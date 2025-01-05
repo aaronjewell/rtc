@@ -43,12 +43,30 @@ services:
       context: ./chat-server
       dockerfile: Dockerfile
     environment:
-      - NODE_ENV=${NODE_ENV}
-      - PORT=80
-      - SERVER_ID=chat-1
-      - JWT_SECRET_FILE=/run/secrets/jwt_secret
-      - SERVICE_DISCOVERY_HOST=service-discovery:2181
-      - SERVER_ID=chat-{{.Task.Slot}}
+      NODE_ENV: ${NODE_ENV}
+      PORT: 80
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      SERVICE_DISCOVERY_HOST: service-discovery:2181
+      SERVER_ID: "chat-{{.Task.Slot}}"
+    deploy:
+      mode: replicated
+      replicas: 2
+    secrets:
+      - jwt_secret
+    depends_on:
+      service-discovery:
+        condition: service_started
+
+  presence-server:
+    build:
+      context: ./presence-server
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      PORT: 80
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      SERVICE_DISCOVERY_HOST: service-discovery:2181
+      SERVER_ID: "presence-{{.Task.Slot}}"
     deploy:
       mode: replicated
       replicas: 2

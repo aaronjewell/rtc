@@ -6,6 +6,7 @@ export class ChatClient extends EventEmitter {
         super();
         this.config = config;
         this.chatWs = null;
+        this.presenceWs = null;
         this.sessionToken = null;
         this.heartbeatInterval = null;
     }
@@ -31,6 +32,7 @@ export class ChatClient extends EventEmitter {
             this.sessionToken = sessionToken;
 
             await this.connectToChatServer(servers.chat);
+            await this.connectToPresenceServer(servers.presence);
 
             this.emit('connected');
         } catch (error) {
@@ -61,9 +63,34 @@ export class ChatClient extends EventEmitter {
         });
     }
 
+    async connectToPresenceServer(serverInfo) {
+        return new Promise((resolve, reject) => {
+            const ws = new WebSocket(
+                `ws://${serverInfo.host}:${serverInfo.port}/presence?token=${this.sessionToken}`
+            );
+
+            ws.on('open', () => {
+                this.presenceWs = ws;
+                resolve();
+            });
+
+            ws.on('error', (error) => {
+                this.emit('error', new Error(`Presence server error: ${error.message}`));
+            });
+
+            ws.on('close', () => {
+                this.presenceWs = null;
+                this.emit('error', new Error('Disconnected from presence server'));
+            });
+        });
+    }
+
     async disconnect() {
         if (this.chatWs) {
             this.chatWs.close();
+        }
+        if (this.presenceWs) {
+            this.presenceWs.close();
         }
     }
 }

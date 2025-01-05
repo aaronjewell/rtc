@@ -1,0 +1,16 @@
+{
+    "name": "presence-server",
+    "version": "1.0.0",
+    "main": "src/index.js",
+    "type": "module",
+    "scripts": {
+        "start": "node src/index.js"
+    },
+    "dependencies": {
+        "express": "^4.17.1",
+        "ws": "^8.2.3",
+        "node-zookeeper-client": "^1.1.0",
+        "jsonwebtoken": "^8.5.1",
+        "ip": "^1.1.5"
+    }
+}

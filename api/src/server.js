@@ -41,13 +41,17 @@ export class API {
 
                 const sessionToken = await this.#generateSessionToken(req.body.username);
 
-                const chatServers = await this.serviceDiscovery.getAvailableServers('/chat-service');
+                const [chatServers, presenceServers] = await Promise.all([
+                    this.serviceDiscovery.getAvailableServers('/chat-service'),
+                    this.serviceDiscovery.getAvailableServers('/presence-service')
+                ]);
 
-                if (!chatServers.length) {
+                if (!chatServers.length || !presenceServers.length) {
                     return res.status(503).json({ error: 'No available servers' });
                 }
 
                 const selectedChatServer = this.serviceDiscovery.selectOptimalServer(chatServers);
+                const selectedPresenceServer = this.serviceDiscovery.selectOptimalServer(presenceServers);
 
                 res.json({
                     sessionToken,
@@ -57,6 +61,11 @@ export class API {
                             port: selectedChatServer.port,
                             id: selectedChatServer.id
                         },
+                        presence: {
+                            host: selectedPresenceServer.host,
+                            port: selectedPresenceServer.port,
+                            id: selectedPresenceServer.id
+                        }
                     }
                 });
 
