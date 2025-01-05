@@ -37,6 +37,20 @@ services:
       database:
         condition: service_healthy
 
+  chat-server:
+    build:
+      context: ./chat-server
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - PORT=8080
+      - SERVER_ID=chat-1
+      - JWT_SECRET_FILE=/run/secrets/jwt_secret
+    secrets:
+      - jwt_secret
+
   database:
     image: mysql:8.0
     env_file:

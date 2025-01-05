@@ -8,19 +8,19 @@ export class API {
         this.app = express();
         this.dal = dal;
 
-        this.registerMiddleware();
-        this.registerRoutes();
+        this.#registerMiddleware();
+        this.#registerRoutes();
     }
 
     async init() {
         this.JWT_SECRET = await fs.readFile(process.env.JWT_SECRET_FILE, 'utf8');
     }
 
-    registerMiddleware() {
+    #registerMiddleware() {
         this.app.use(express.json());
     }
 
-    registerRoutes() {
+    #registerRoutes() {
         this.app.get('/health', (req, res) => {
             res.json({ status: 'ok' });
         });
@@ -29,7 +29,7 @@ export class API {
             try {
                 const { username, password } = req.body;
 
-                const isValid = await this.validateCredentials({ username, password });
+                const isValid = await this.#validateCredentials({ username, password });
 
                 if (!isValid) {
                     return res.status(401).json({ error: 'Invalid credentials' });
@@ -37,10 +37,18 @@ export class API {
 
                 await this.dal.updateLastLogin(username);
 
-                const sessionToken = await this.generateSessionToken(req.body.username);
+                const sessionToken = await this.#generateSessionToken(req.body.username);
 
                 res.json({
                     sessionToken,
+                    servers: {
+                        // TODO: get from service discovery
+                        chat: {
+                            host: 'localhost',
+                            port: 8080,
+                            id: 'chat-1'
+                        },
+                    }
                 });
 
             } catch (error) {
@@ -50,7 +58,7 @@ export class API {
         });
     }
 
-    async validateCredentials({ username, password }) {
+    async #validateCredentials({ username, password }) {
         try {
             const user = await this.dal.getUserByUsername(username);
 
@@ -61,7 +69,7 @@ export class API {
         }
     }
 
-    async generateSessionToken(username) {
+    async #generateSessionToken(username) {
         if (!this.JWT_SECRET) {
             throw new Error('JWT secret is not set');
         }
