@@ -5,6 +5,8 @@ const server = new API();
 try {
     const port = process.env.PORT;
 
+    await server.init();
+
     server.app.listen(port, () => {
         console.log(`API listening on port ${port}`);
     });
