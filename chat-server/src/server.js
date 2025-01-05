@@ -5,12 +5,13 @@ import { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
 
 export class ChatServer {
-    constructor() {
+    constructor(serviceDiscovery) {
         this.app = express();
         this.server = http.createServer(this.app);
         this.wss = new WebSocketServer({ server: this.server });
 
         this.clients = new Map();
+        this.serviceDiscovery = serviceDiscovery;
     }
 
     async init() {
@@ -80,6 +81,8 @@ export class ChatServer {
     #setupGracefulShutdown() {
         const shutdown = async () => {
             console.log('Shutting down chat server...');
+
+            this.serviceDiscovery.close();
             
             this.wss.clients.forEach((client) => {
                 client.close(1000, 'Server shutting down');

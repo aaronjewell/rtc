@@ -10,6 +10,7 @@
         "bcrypt": "^5.1.1",
         "express": "^4.21.2",
         "jsonwebtoken": "^9.0.2",
-        "mysql2": "^3.12.0"
+        "mysql2": "^3.12.0",
+        "node-zookeeper-client": "^1.1.0"
     }
 }

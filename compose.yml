@@ -21,6 +21,7 @@ services:
       DB_DATABASE: ${DB_DATABASE}
       JWT_SECRET_FILE: /run/secrets/jwt_secret
       JWT_EXPIRATION: ${JWT_EXPIRATION}
+      SERVICE_DISCOVERY_HOST: service-discovery:2181
       TEST_USERNAME: ${TEST_USERNAME}
       TEST_PASSWORD: ${TEST_PASSWORD}
       TEST_EMAIL: ${TEST_EMAIL}
@@ -41,15 +42,21 @@ services:
     build:
       context: ./chat-server
       dockerfile: Dockerfile
-    ports:
-      - "8080:80"
     environment:
       - NODE_ENV=${NODE_ENV}
-      - PORT=8080
+      - PORT=80
       - SERVER_ID=chat-1
       - JWT_SECRET_FILE=/run/secrets/jwt_secret
+      - SERVICE_DISCOVERY_HOST=service-discovery:2181
+      - SERVER_ID=chat-{{.Task.Slot}}
+    deploy:
+      mode: replicated
+      replicas: 2
     secrets:
       - jwt_secret
+    depends_on:
+      service-discovery:
+        condition: service_started
 
   database:
     image: mysql:8.0
@@ -72,6 +79,16 @@ services:
       retries: 5
       start_period: 10s
 
+  service-discovery:
+    image: zookeeper:3.8
+    ports:
+      - "2181:2181"
+    environment:
+      - ZOO_MY_ID=1
+      - ZOO_SERVERS=server.1=zookeeper:2888:3888;2181
+    volumes:
+      - zookeeper-data:/data
+      - zookeeper-datalog:/datalog
 
 secrets:
   db_root_password:
@@ -80,3 +97,7 @@ secrets:
     file: ./secrets/db_password.txt
   jwt_secret:
     file: ./secrets/jwt_secret.txt
+
+volumes:
+  zookeeper-data:
+  zookeeper-datalog:

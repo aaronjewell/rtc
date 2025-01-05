@@ -4,12 +4,14 @@ import fs from 'fs/promises';
 import jwt from 'jsonwebtoken';
 
 export class API {
-    constructor(dal) {
+    constructor(dal, serviceDiscovery) {
         this.app = express();
         this.dal = dal;
+        this.serviceDiscovery = serviceDiscovery;
 
         this.#registerMiddleware();
         this.#registerRoutes();
+        this.#setupGracefulShutdown();
     }
 
     async init() {
@@ -39,14 +41,21 @@ export class API {
 
                 const sessionToken = await this.#generateSessionToken(req.body.username);
 
+                const chatServers = await this.serviceDiscovery.getAvailableServers('/chat-service');
+
+                if (!chatServers.length) {
+                    return res.status(503).json({ error: 'No available servers' });
+                }
+
+                const selectedChatServer = this.serviceDiscovery.selectOptimalServer(chatServers);
+
                 res.json({
                     sessionToken,
                     servers: {
-                        // TODO: get from service discovery
                         chat: {
-                            host: 'localhost',
-                            port: 8080,
-                            id: 'chat-1'
+                            host: selectedChatServer.host,
+                            port: selectedChatServer.port,
+                            id: selectedChatServer.id
                         },
                     }
                 });
@@ -82,5 +91,21 @@ export class API {
             this.JWT_SECRET,
             { expiresIn: process.env.JWT_EXPIRATION }
         );
+    }
+
+    #setupGracefulShutdown() {
+        const shutdown = async () => {
+            console.log('Shutting down API...');
+
+            this.serviceDiscovery.close();
+
+            this.server.close(() => {
+                console.log('API shutdown complete');
+                process.exit(0);
+            });
+        };
+
+        process.on('SIGTERM', shutdown);
+        process.on('SIGINT', shutdown);
     }
 }
