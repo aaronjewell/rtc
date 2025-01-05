@@ -43,18 +43,15 @@ export class PresenceServer {
     #setupWebSocket() {
         this.wss.on('connection', async (ws, req) => {
             try {
-                // Extract token from query string
                 const token = new URL(req.url, 'ws://localhost').searchParams.get('token');
                 if (!token) {
                     ws.close(4001, 'No authentication token provided');
                     return;
                 }
 
-                // Verify token
                 const decoded = await this.#verifyToken(token);
                 const userId = decoded.username;
 
-                // Store client connection
                 const clientInfo = {
                     ws,
                     userId,
@@ -67,7 +64,6 @@ export class PresenceServer {
 
                 console.log(`Client connected: ${userId}`);
 
-                // Handle disconnection
                 ws.on('close', async () => {
                     await this.#handleDisconnection(userId);
                 });

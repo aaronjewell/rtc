@@ -5,12 +5,13 @@ import { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
 
 export class ChatServer {
-    constructor(serviceDiscovery) {
+    constructor(dal, serviceDiscovery) {
         this.app = express();
         this.server = http.createServer(this.app);
         this.wss = new WebSocketServer({ server: this.server });
 
         this.clients = new Map();
+        this.dal = dal;
         this.serviceDiscovery = serviceDiscovery;
     }
 
@@ -50,6 +51,18 @@ export class ChatServer {
 
                 console.log(`Client connected: ${userId}`);
 
+                ws.on('message', async (message) => {
+                    try {
+                        await this.#handleMessage(userId, message);
+                    } catch (error) {
+                        console.error('Error handling message:', error);
+                        ws.send(JSON.stringify({
+                            type: 'error',
+                            error: 'Failed to process message'
+                        }));
+                    }
+                });
+
                 ws.on('close', () => {
                     this.clients.delete(userId);
                     console.log(`Client disconnected: ${userId}`);
@@ -58,6 +71,80 @@ export class ChatServer {
             } catch (error) {
                 console.error('WebSocket connection error:', error);
                 ws.close(3000, 'Authentication failed');
+            }
+        });
+    }
+
+    async #handleMessage(ws, userId, message) {
+        const data = JSON.parse(message);
+
+        switch (data.type) {
+            case 'join_room':
+                await this.#handleJoinRoom(userId, data.roomId);
+                break;
+
+            case 'chat_message':
+                await this.#handleChatMessage(userId, data.roomId, data.content);
+                break;
+
+            case 'typing':
+                await this.#handleTypingIndicator(userId, data.roomId, data.isTyping);
+                break;
+
+            default:
+                throw new Error('Unknown message type');
+        }
+    }
+
+    async #handleJoinRoom(userId, roomId) {
+        const room = await this.dal.getRoom(roodId);
+
+        if (!room) {
+            throw new Error('Room not found');
+        }
+
+        const messages = await this.dal.getRecentMessages(roomId);
+
+        const ws = this.clients.get(userId);
+        if (ws) {
+            ws.send(JSON.stringify({
+                type: 'room_history',
+                roomId,
+                messages: messages
+            }));
+        }
+    }
+
+    async #handleChatMessage(userId, roomId, content) {
+        await this.dal.storeMessage(roomId, userId, content);
+
+        // Broadcast to all clients in the room
+        const message = {
+            type: 'chat_message',
+            roomId,
+            userId,
+            content,
+            timestamp: Date.now()
+        };
+
+        this.#broadcast(roomId, message);
+    }
+
+    async #handleTypingIndicator(userId, roomId, isTyping) {
+        this.#broadcast(roomId, {
+            type: 'typing_indicator',
+            roomId,
+            userId,
+            isTyping
+        });
+    }
+
+    #broadcast(roomId, message) {
+        // TODO: track which users are in which rooms
+        // and only broadcast to those users
+        this.clients.forEach((ws) => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(message));
             }
         });
     }
@@ -83,6 +170,8 @@ export class ChatServer {
             console.log('Shutting down chat server...');
 
             this.serviceDiscovery.close();
+
+            await this.dal.close();
             
             this.wss.clients.forEach((client) => {
                 client.close(1000, 'Server shutting down');

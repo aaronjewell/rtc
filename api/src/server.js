@@ -108,6 +108,8 @@ export class API {
 
             this.serviceDiscovery.close();
 
+            await this.dal.close();
+
             this.server.close(() => {
                 console.log('API shutdown complete');
                 process.exit(0);

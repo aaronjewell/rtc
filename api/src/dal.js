@@ -63,4 +63,8 @@ export class DAL {
             console.log('Test user created successfully');
         }
     }
+
+    async close() {
+        await this.pool.end();
+    }
 }

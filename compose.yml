@@ -37,23 +37,29 @@ services:
     depends_on:
       database:
         condition: service_healthy
+      service-discovery:
+        condition: service_started
 
   chat-server:
     build:
       context: ./chat-server
       dockerfile: Dockerfile
     environment:
+      KV_STORE_HOST: kv-store
       NODE_ENV: ${NODE_ENV}
       PORT: 80
       JWT_SECRET_FILE: /run/secrets/jwt_secret
       SERVICE_DISCOVERY_HOST: service-discovery:2181
       SERVER_ID: "chat-{{.Task.Slot}}"
+
     deploy:
       mode: replicated
       replicas: 2
     secrets:
       - jwt_secret
     depends_on:
+      kv-store:
+        condition: service_healthy
       service-discovery:
         condition: service_started
 
@@ -73,11 +79,13 @@ services:
     secrets:
       - jwt_secret
     depends_on:
+      kv-store:
+        condition: service_healthy
       service-discovery:
         condition: service_started
 
   database:
-    image: mysql:8.0
+    image: mysql:8.3
     env_file:
       - .env
     environment:
@@ -96,6 +104,23 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+  kv-store:
+    image: cassandra:latest
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    environment:
+      - CASSANDRA_CLUSTER_NAME=chat_cluster
+      - CASSANDRA_ENDPOINT_SNITCH=SimpleSnitch
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT now() FROM system.local;"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
 
   service-discovery:
     image: zookeeper:3.8
@@ -117,5 +142,7 @@ secrets:
     file: ./secrets/jwt_secret.txt
 
 volumes:
+  cassandra-data:
+  mysql-data:
   zookeeper-data:
   zookeeper-datalog:
