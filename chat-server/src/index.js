@@ -1,8 +1,11 @@
 import { ChatServer } from './server.js';
 import { ServiceDiscovery } from './service-discovery.js';
 import { DAL } from './dal.js';
+import { v4 as uuidv4 } from 'uuid';
 
-const serviceDiscovery = new ServiceDiscovery();
+const serverId = process.env.SERVER_ID + '-' + uuidv4();
+
+const serviceDiscovery = new ServiceDiscovery(serverId);
 
 try {
     await serviceDiscovery.init();
@@ -20,7 +23,7 @@ try {
     process.exit(1);
 }
 
-const server = new ChatServer(dal, serviceDiscovery);
+const server = new ChatServer(dal, serviceDiscovery, serverId);
 
 try {
     await server.init()

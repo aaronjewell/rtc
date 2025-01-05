@@ -1,4 +1,4 @@
-import { Client } from 'cassandra-driver';
+import { Client, types } from 'cassandra-driver';
 
 export class DAL {
     constructor() {
@@ -114,11 +114,21 @@ export class DAL {
     }
 
     async storeMessage(roomId, userId, content) {
+        const messageId = types.TimeUuid.now();
+
         await this.cassandra.execute(
-            'INSERT INTO chat_system.messages (room_id, message_id, user_id, content, timestamp) VALUES (?, now(), ?, ?, toTimestamp(now()))',
-            [roomId, userId, content],
+            'INSERT INTO chat_system.messages (room_id, message_id, user_id, content, timestamp) VALUES (?, ?, ?, ?, toTimestamp(now()))',
+            [roomId, messageId, userId, content],
             { prepare: true }
         );
+
+        const result = await this.cassandra.execute(
+            'SELECT * FROM chat_system.messages WHERE room_id = ? AND message_id = ?',
+            [roomId, messageId],
+            { prepare: true }
+        );
+
+        return result.first();
     }
 
     async close() {

@@ -49,16 +49,22 @@ services:
       NODE_ENV: ${NODE_ENV}
       PORT: 80
       JWT_SECRET_FILE: /run/secrets/jwt_secret
+      KAFKA_BROKER: kafka:9092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
       SERVICE_DISCOVERY_HOST: service-discovery:2181
       SERVER_ID: "chat"
-
     deploy:
       mode: replicated
       replicas: 2
     secrets:
       - jwt_secret
     depends_on:
+      kafka:
+        condition: service_healthy
       kv-store:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       service-discovery:
         condition: service_started
@@ -84,6 +90,8 @@ services:
         condition: service_healthy
       service-discovery:
         condition: service_started
+      kafka:
+        condition: service_healthy
 
   database:
     image: mysql:8.3
@@ -125,14 +133,88 @@ services:
 
   service-discovery:
     image: zookeeper:3.8
-    ports:
-      - "2181:2181"
     environment:
       - ZOO_MY_ID=1
       - ZOO_SERVERS=server.1=zookeeper:2888:3888;2181
     volumes:
       - zookeeper-data:/data
       - zookeeper-datalog:/datalog
+
+  zookeeper-kafka:
+    image: bitnami/zookeeper:latest
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+    volumes:
+      - zookeeper-kafka-data:/bitnami
+    healthcheck:
+      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: bitnami/kafka:latest
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper-kafka:2181
+      KAFKA_LISTENERS: PLAINTEXT://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      ALLOW_PLAINTEXT_LISTENER: yes
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/bitnami
+    depends_on:
+      zookeeper-kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  kafka-setup:
+    image: confluentinc/cp-kafka:latest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -c '
+        echo "Waiting for Kafka to be ready..." &&
+        /usr/bin/kafka-topics --create --if-not-exists \
+          --bootstrap-server kafka:9092 \
+          --topic chat-messages \
+          --partitions 6 \
+          --replication-factor 1 \
+          --config cleanup.policy=delete
+      '
+
+  message-dispatcher:
+    build:
+      context: ./message-dispatcher
+      dockerfile: Dockerfile
+    environment:
+      KAFKA_BROKER: kafka:9092
+      REDIS_HOST: redis
+      SERVICE_DISCOVERY_HOST: service-discovery:2181
+    depends_on:
+      kafka-setup:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:6
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 secrets:
   db_root_password:
@@ -147,3 +229,6 @@ volumes:
   mysql-data:
   zookeeper-data:
   zookeeper-datalog:
+  zookeeper-kafka-data:
+  kafka-data:
+  redis-data:

@@ -1,0 +1,13 @@
+{
+    "name": "message-dispatcher",
+    "version": "1.0.0",
+    "main": "src/index.js",
+    "type": "module",
+    "scripts": {
+        "start": "node src/index.js"
+    },
+    "dependencies": {
+        "kafkajs": "^2.2.4",
+        "ioredis": "^5.4.2"
+    }
+}

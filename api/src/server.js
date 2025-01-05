@@ -154,7 +154,7 @@ export class API {
 
             await this.dal.close();
 
-            this.server.close(() => {
+            this.app.close(() => {
                 console.log('API shutdown complete');
                 process.exit(0);
             });

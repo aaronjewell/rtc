@@ -1,22 +1,38 @@
 import express from 'express';
 import fs from 'fs/promises';
 import http from 'http';
+import ip from 'ip';
 import { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
+import { Kafka } from 'kafkajs';
+import { Redis } from 'ioredis';
 
 export class ChatServer {
-    constructor(dal, serviceDiscovery) {
+    constructor(dal, serviceDiscovery, serverId) {
         this.app = express();
         this.server = http.createServer(this.app);
         this.wss = new WebSocketServer({ server: this.server });
 
+        this.serverId = serverId;
         this.clients = new Map();
         this.dal = dal;
         this.serviceDiscovery = serviceDiscovery;
+
+        const kafka = new Kafka({
+            clientId: `chat-server-${this.serverId}`,
+            brokers: [process.env.KAFKA_BROKER]
+        });
+        this.producer = kafka.producer();
+
+        this.redis = new Redis({
+            host: process.env.REDIS_HOST,
+            port: process.env.REDIS_PORT,
+        });
     }
 
     async init() {
         await this.#readJwtSecret();
+        await this.producer.connect();
 
         this.#setupWebSocket();
         this.#setupServer();
@@ -30,12 +46,23 @@ export class ChatServer {
     #setupServer() {
         const port = process.env.PORT;
 
+        this.app.post('/dispatch-message', express.json(), (req, res) => {
+            const message = req.body;
+            console.log(`Dispatching message to ${message.user_id}`, message);
+
+            this.#deliverMessage(message);
+
+            res.status(200).send('Message dispatched');
+        });
+
         this.server.listen(port, () => {
             console.log(`Chat server ${process.env.SERVER_ID} is running on port ${port}`);
         });
     }
 
     #setupWebSocket() {
+        this.rooms = new Map();
+
         this.wss.on('connection', async (ws, req) => {
             try {
                 const token = new URL(req.url, 'ws://localhost').searchParams.get('token');
@@ -51,6 +78,12 @@ export class ChatServer {
 
                 console.log(`Client connected: ${userId}`);
 
+                this.redis.hmset(`user:${userId}`, {
+                    serverId: this.serverId,
+                    host: ip.address(),
+                    port: process.env.PORT
+                });
+
                 ws.on('message', async (message) => {
                     try {
                         await this.#handleMessage(userId, message);
@@ -63,9 +96,18 @@ export class ChatServer {
                     }
                 });
 
-                ws.on('close', () => {
+                ws.on('close', async () => {
                     this.clients.delete(userId);
                     console.log(`Client disconnected: ${userId}`);
+
+                    for (const [roomId, users] of this.rooms) {
+                        if (users.has(userId)) {
+                            users.delete(userId);
+                            await this.redis.srem(`room:${roomId}`, userId);
+                        }
+                    }
+
+                    await this.redis.del(`user:${userId}`);
                 });
 
             } catch (error) {
@@ -88,7 +130,7 @@ export class ChatServer {
                 break;
 
             case 'typing':
-                await this.#handleTypingIndicator(userId, data.roomId, data.isTyping);
+                // TODO: Implement this
                 break;
 
             default:
@@ -103,50 +145,44 @@ export class ChatServer {
             throw new Error('Room not found');
         }
 
+        if (!this.rooms.has(roomId)) {
+            this.rooms.set(roomId, new Set());
+        }
+
+        this.rooms.get(roomId).add(userId);
+
         const messages = await this.dal.getRecentMessages(roomId);
+
+        await this.redis.sadd(`room:${roomId}`, userId);
 
         const ws = this.clients.get(userId);
         if (ws) {
             ws.send(JSON.stringify({
                 type: 'room_history',
                 roomId,
-                messages: messages
+                messages: messages.reverse()
             }));
         }
     }
 
     async #handleChatMessage(userId, roomId, content) {
-        await this.dal.storeMessage(roomId, userId, content);
+        const message = await this.dal.storeMessage(roomId, userId, content);
 
-        // Broadcast to all clients in the room
-        const message = {
-            type: 'chat_message',
-            roomId,
-            userId,
-            content,
-            timestamp: Date.now()
-        };
+        console.log(`Delivering message to room ${roomId}`, JSON.stringify(message));
 
-        this.#broadcast(roomId, message);
-    }
-
-    async #handleTypingIndicator(userId, roomId, isTyping) {
-        this.#broadcast(roomId, {
-            type: 'typing_indicator',
-            roomId,
-            userId,
-            isTyping
+        await this.producer.send({
+            topic: 'chat-messages',
+            messages: [{ key: roomId, value: JSON.stringify(message) }]
         });
     }
 
-    #broadcast(roomId, message) {
-        // TODO: track which users are in which rooms
-        // and only broadcast to those users
-        this.clients.forEach((ws) => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify(message));
-            }
-        });
+    async #deliverMessage(message) {
+        const ws = this.clients.get(message.user_id);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'chat_message', ...message }));
+        } else {
+            console.error(`Failed to deliver message to ${message.user_id}`, message);
+        }
     }
 
     #verifyToken(token) {
@@ -168,6 +204,15 @@ export class ChatServer {
     #setupGracefulShutdown() {
         const shutdown = async () => {
             console.log('Shutting down chat server...');
+
+            const userIds = Array.from(this.clients.keys());
+
+            for (const userId of userIds) {
+                await this.redis.del(`user:${userId}`);
+            }
+            this.redis.disconnect();
+
+            this.producer.disconnect();
 
             this.serviceDiscovery.close();
 
