@@ -19,8 +19,14 @@ services:
       DB_USER: ${DB_USER}
       DB_PASSWORD_FILE: /run/secrets/db_password
       DB_DATABASE: ${DB_DATABASE}
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      JWT_EXPIRATION: ${JWT_EXPIRATION}
+      TEST_USERNAME: ${TEST_USERNAME}
+      TEST_PASSWORD: ${TEST_PASSWORD}
+      TEST_EMAIL: ${TEST_EMAIL}
     secrets:
       - db_password
+      - jwt_secret
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${PORT}/health"]
       interval: 10s
@@ -58,3 +64,5 @@ secrets:
     file: ./secrets/db_root_password.txt
   db_password:
     file: ./secrets/db_password.txt
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
