@@ -21,6 +21,16 @@ async function main() {
             showHelp();
         });
 
+        client.on('message', (message) => {
+            console.log(chalk.cyan(`\n${message.user_id}: ${message.content}`));
+            rl.prompt(true);
+        });
+
+        client.on('presence', (update) => {
+            console.log(chalk.yellow(`\n${update.user_id} is now ${update.status}`));
+            rl.prompt(true);
+        });
+
         client.on('error', (error) => {
             console.error(chalk.red(`\nError: ${error.message}`));
             rl.prompt(true);
@@ -46,6 +56,9 @@ async function main() {
 function showHelp() {
     console.log(chalk.green('\nAvailable commands:'));
     console.log('/help - Show this help message');
+    console.log('/join <roomId> - Join a chat room');
+    console.log('/msg <message> - Send message to current room');
+    console.log('/status <status> - Update your presence status');
     console.log('/quit - Exit the application');
     rl.prompt(true);
 }
@@ -58,6 +71,29 @@ async function handleCommand(input, client) {
     switch (command) {
         case 'help':
             showHelp();
+            break;
+
+        case 'join':
+            if (!args[0]) {
+                throw new Error('Room ID required');
+            }
+            await client.joinRoom(args[0]);
+            console.log(chalk.green(`Joined room: ${args[0]}`));
+            break;
+
+        case 'msg':
+            if (!args.length) {
+                throw new Error('Message required');
+            }
+            await client.sendMessage(args.join(' '));
+            break;
+
+        case 'status':
+            if (!args[0]) {
+                throw new Error('Status required');
+            }
+            await client.updateStatus(args[0]);
+            console.log(chalk.green(`Status updated to: ${args[0]}`));
             break;
 
         case 'quit':

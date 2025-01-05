@@ -75,7 +75,7 @@ export class ChatServer {
         });
     }
 
-    async #handleMessage(ws, userId, message) {
+    async #handleMessage(userId, message) {
         const data = JSON.parse(message);
 
         switch (data.type) {
@@ -97,7 +97,7 @@ export class ChatServer {
     }
 
     async #handleJoinRoom(userId, roomId) {
-        const room = await this.dal.getRoom(roodId);
+        const room = await this.dal.getRoom(roomId);
 
         if (!room) {
             throw new Error('Room not found');

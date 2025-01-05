@@ -71,6 +71,7 @@ services:
       NODE_ENV: ${NODE_ENV}
       PORT: 80
       JWT_SECRET_FILE: /run/secrets/jwt_secret
+      KV_STORE_HOST: kv-store
       SERVICE_DISCOVERY_HOST: service-discovery:2181
       SERVER_ID: "presence"
     deploy:

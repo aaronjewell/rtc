@@ -5,14 +5,13 @@ export class DAL {
         this.cassandra = new Client({
             contactPoints: [process.env.KV_STORE_HOST],
             localDataCenter: 'datacenter1',
-            keyspace: 'chat_system',
             protocolOptions: { port: 9042 },
-            socketOptions: { 
+            socketOptions: {
                 readTimeout: 60000,
-                connectTimeout: 60000 
+                connectTimeout: 60000
             },
-            pooling: { 
-                maxRequestsPerConnection: 32768 
+            pooling: {
+                maxRequestsPerConnection: 32768
             }
         });
     }
@@ -24,11 +23,13 @@ export class DAL {
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 console.log(`Attempting to connect to Cassandra (attempt ${attempt}/${maxRetries})...`);
-                
+
                 const queries = [
                     `CREATE KEYSPACE IF NOT EXISTS chat_system 
                      WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}`,
-                    
+
+                    `USE chat_system;`,
+
                     `CREATE TABLE IF NOT EXISTS chat_system.messages (
                         room_id text,
                         message_id timeuuid,
@@ -37,7 +38,7 @@ export class DAL {
                         timestamp timestamp,
                         PRIMARY KEY ((room_id), message_id)
                     ) WITH CLUSTERING ORDER BY (message_id DESC)`,
-                    
+
                     `CREATE TABLE IF NOT EXISTS chat_system.rooms (
                         room_id text PRIMARY KEY,
                         name text,
@@ -53,19 +54,41 @@ export class DAL {
                 for (const query of queries) {
                     await this.cassandra.execute(query);
                 }
-                
-                console.log('Cassandra schema initialized successfully');
-                return;
 
+                console.log('Cassandra schema initialized successfully');
+
+                await this.#seed();
+
+                console.log('Cassandra seed data inserted successfully');
             } catch (error) {
                 console.error(`Failed to connect to Cassandra (attempt ${attempt}/${maxRetries}):`, error.message);
-                
+
                 if (attempt === maxRetries) {
                     throw new Error(`Failed to connect to Cassandra after ${maxRetries} attempts`);
                 }
-                
+
                 // Wait before retrying
                 await new Promise(resolve => setTimeout(resolve, retryDelay));
+            }
+        }
+    }
+
+    async #seed() {
+        if (process.env.NODE_ENV === 'development') {
+            const existingRooms = await this.cassandra.execute(
+                'SELECT * FROM chat_system.rooms WHERE room_id = ?',
+                ['test-room'],
+                { prepare: true }
+            );
+
+            if (existingRooms.rows.length === 0) {
+                const queries = [
+                    `INSERT INTO chat_system.rooms (room_id, name, created_at) VALUES ('test-room', 'Test Room', toTimestamp(now()))`
+                ];
+
+                for (const query of queries) {
+                    await this.cassandra.execute(query);
+                }
             }
         }
     }

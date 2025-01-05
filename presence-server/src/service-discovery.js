@@ -25,6 +25,10 @@ export class ServiceDiscovery {
         });
     }
 
+    getServerId() {
+        return this.serverId;
+    }
+
     async registerService() {
         const serverPath = `${this.basePath}/${this.serverId}`;
         const serverData = JSON.stringify({
@@ -36,10 +40,10 @@ export class ServiceDiscovery {
 
         try {
             // Ensure base path exists
-            await this.createNode(this.basePath, null, zookeeper.CreateMode.PERSISTENT);
+            await this.#createNode(this.basePath, null, zookeeper.CreateMode.PERSISTENT);
             
             // Register this server (ephemeral node - removes when connection drops)
-            await this.createNode(
+            await this.#createNode(
                 serverPath, 
                 Buffer.from(serverData), 
                 zookeeper.CreateMode.EPHEMERAL
@@ -52,7 +56,7 @@ export class ServiceDiscovery {
         }
     }
 
-    createNode(path, data, mode) {
+    #createNode(path, data, mode) {
         return new Promise((resolve, reject) => {
             this.client.create(
                 path,
