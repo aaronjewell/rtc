@@ -1,11 +1,11 @@
 import zookeeper from 'node-zookeeper-client';
 import ip from 'ip';
-
+import { v4 as uuidv4 } from 'uuid';
 export class ServiceDiscovery {
     constructor() {
         this.client = zookeeper.createClient(process.env.SERVICE_DISCOVERY_HOST);
         this.basePath = '/presence-service';
-        this.serverId = process.env.SERVER_ID;
+        this.serverId = process.env.SERVER_ID + '-' + uuidv4();
         this.port = process.env.PORT;
     }
 

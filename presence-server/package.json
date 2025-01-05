@@ -11,6 +11,7 @@
         "ws": "^8.2.3",
         "node-zookeeper-client": "^1.1.0",
         "jsonwebtoken": "^8.5.1",
-        "ip": "^1.1.5"
+        "ip": "^1.1.5",
+        "uuid": "^11.0.3"
     }
 }

@@ -71,6 +71,14 @@ export class ServiceDiscovery {
         });
     }
 
+    getName() {
+        return this.client.getState().name;
+    }
+
+    getCode() {
+        return this.client.getState().code;
+    }
+
     selectOptimalServer(servers) {
         if (!servers || servers.length === 0) {
             return null;

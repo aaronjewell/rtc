@@ -24,7 +24,51 @@ export class API {
 
     #registerRoutes() {
         this.app.get('/health', (req, res) => {
-            res.json({ status: 'ok' });
+            const health = {
+                status: 'ok',
+                timestamp: new Date().toISOString(),
+                service: 'api-server',
+                zookeeper: this.serviceDiscovery.getName(),
+            };
+
+            res.json(health);
+        });
+
+        this.app.get('/health/details', async (req, res) => {
+            try {
+                const [chatServers, presenceServers] = await Promise.all([
+                    this.serviceDiscovery.getAvailableServers('/chat-service'),
+                    this.serviceDiscovery.getAvailableServers('/presence-service')
+                ]);
+
+                const health = {
+                    status: 'ok',
+                    timestamp: new Date().toISOString(),
+                    service: 'api-server',
+                    zookeeper: {
+                        status: this.serviceDiscovery.getName(),
+                        connected: this.serviceDiscovery.getCode() === 3 // 3 = SYNC_CONNECTED
+                    },
+                    services: {
+                        chat: {
+                            available: chatServers.length,
+                            servers: chatServers
+                        },
+                        presence: {
+                            available: presenceServers.length,
+                            servers: presenceServers
+                        }
+                    }
+                };
+
+                res.json(health);
+            } catch (error) {
+                res.status(500).json({
+                    status: 'error',
+                    timestamp: new Date().toISOString(),
+                    error: error.message
+                });
+            }
         });
 
         this.app.post('/auth', async (req, res) => {
