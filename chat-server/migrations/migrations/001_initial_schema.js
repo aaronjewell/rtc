@@ -29,7 +29,7 @@ export const up = async (client) => {
 
         `CREATE TABLE IF NOT EXISTS channel_messages (
             channel_id uuid,
-            message_id timeuuid,
+            message_id bigint,
             user_id text,
             content text,
             created_at timestamp,

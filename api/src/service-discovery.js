@@ -21,54 +21,53 @@ export class ServiceDiscovery {
         });
     }
 
-    async getAvailableServers(basePath) {
-        return new Promise((resolve, reject) => {
-            this.client.getChildren(
-                basePath,
-                null,
-                async (error, children) => {
-                    if (error) {
-                        reject(error);
-                        return;
-                    }
+    async getAvailableServers(servicePath) {
+        try {
+            const children = await new Promise((resolve, reject) => {
+                this.client.getChildren(
+                    servicePath,
+                    null,
+                    (error, children) => error ? reject(error) : resolve(children)
+                );
+            });
 
-                    try {
-                        const servers = await Promise.all(
-                            children.map(child => this.#getServerData(`${basePath}/${child}`))
+            const servers = await Promise.all(children.map(async child => {
+                try {
+                    const data = await new Promise((resolve, reject) => {
+                        this.client.getData(
+                            `${servicePath}/${child}`,
+                            null,
+                            (error, data) => error ? reject(error) : resolve(data)
                         );
-                        resolve(servers);
-                    } catch (err) {
-                        reject(err);
-                    }
-                }
-            );
-        });
-    }
+                    });
 
-    async #getServerData(path) {
-        return new Promise((resolve, reject) => {
-            this.client.getData(
-                path,
-                null,
-                (error, data) => {
-                    if (error) {
-                        // Handle case where node was deleted
-                        if (error.getCode() === zookeeper.Exception.NO_NODE) {
-                            resolve(null);
-                            return;
-                        }
-                        reject(error);
-                        return;
+                    if (!data) {
+                        console.warn(`No data found for server ${child}`);
+                        return null;
                     }
+
                     try {
-                        resolve(JSON.parse(data.toString()));
+                        const serverInfo = JSON.parse(data.toString());
+                        if (!serverInfo.host || !serverInfo.port || serverInfo.id === undefined) {
+                            console.warn(`Invalid server data for ${child}:`, serverInfo);
+                            return null;
+                        }
+                        return serverInfo;
                     } catch (parseError) {
-                        console.error(`Failed to parse server data at ${path}:`, parseError);
-                        resolve(null);
+                        console.error(`Failed to parse server data for ${child}:`, parseError);
+                        return null;
                     }
+                } catch (error) {
+                    console.error(`Failed to get data for server ${child}:`, error);
+                    return null;
                 }
-            );
-        });
+            }));
+
+            return servers.filter(server => server !== null);
+        } catch (error) {
+            console.error(`Failed to get available servers from ${servicePath}:`, error);
+            return [];
+        }
     }
 
     getName() {
@@ -84,12 +83,9 @@ export class ServiceDiscovery {
             return null;
         }
 
-        // TODO: Implement more sophisticated selection based on:
-        // - Server load
-        // - Geographic proximity
-        // - Response time
-        // - Connection count
-        return servers[Math.floor(Math.random() * servers.length)];
+        // For now, just return the first valid server
+        // TODO: Implement better selection strategy based on load/latency
+        return servers[0];
     }
 
     close() {

@@ -94,8 +94,26 @@ export class API {
                     return res.status(503).json({ error: 'No available servers' });
                 }
 
-                const selectedChatServer = this.serviceDiscovery.selectOptimalServer(chatServers);
-                const selectedPresenceServer = this.serviceDiscovery.selectOptimalServer(presenceServers);
+                // Ensure server data is properly parsed and has required fields
+                const validChatServers = chatServers.filter(server => 
+                    server && server.host && server.port && server.id !== undefined
+                );
+
+                const validPresenceServers = presenceServers.filter(server => 
+                    server && server.host && server.port && server.id !== undefined
+                );
+
+                if (!validChatServers.length || !validPresenceServers.length) {
+                    console.error('Invalid server data:', { chatServers, presenceServers });
+                    return res.status(503).json({ error: 'Invalid server configuration' });
+                }
+
+                const selectedChatServer = this.serviceDiscovery.selectOptimalServer(validChatServers);
+                const selectedPresenceServer = this.serviceDiscovery.selectOptimalServer(validPresenceServers);
+
+                if (!selectedChatServer || !selectedPresenceServer) {
+                    return res.status(503).json({ error: 'Failed to select available servers' });
+                }
 
                 res.json({
                     sessionToken,

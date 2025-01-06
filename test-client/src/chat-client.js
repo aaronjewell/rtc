@@ -11,6 +11,7 @@ export class ChatClient extends EventEmitter {
         this.sessionToken = null;
         this.heartbeatInterval = null;
         this.channels = new Map(); // channelId -> channel info
+        this.messagesByChannel = new Map(); // channelId -> messages[]
     }
 
     async connect() {
@@ -250,5 +251,47 @@ export class ChatClient extends EventEmitter {
             name,
             participants
         }));
+    }
+
+    handleMessage(message) {
+        if (message.type === 'chat_message') {
+            const channelMessages = this.messagesByChannel.get(message.channel_id) || [];
+            channelMessages.push(message);
+            
+            // Sort by string comparison of Snowflake IDs
+            channelMessages.sort((a, b) => a.message_id.localeCompare(b.message_id));
+            
+            this.messagesByChannel.set(message.channel_id, channelMessages);
+            this.emit('message', message);
+        }
+        // ... handle other message types
+    }
+
+    async getChannelHistory(channelId, beforeId = null, limit = 50) {
+        const messages = await this.fetchMessages(channelId, beforeId, limit);
+        
+        // Update local message store
+        let channelMessages = this.messagesByChannel.get(channelId) || [];
+        channelMessages = [...messages, ...channelMessages];
+        channelMessages.sort((a, b) => a.message_id.localeCompare(b.message_id));
+        this.messagesByChannel.set(channelId, channelMessages);
+        
+        return messages;
+    }
+
+    async fetchMessages(channelId, beforeId = null, limit = 50) {
+        const url = new URL(`${this.config.apiUrl}/channels/${channelId}/messages`);
+        if (beforeId) url.searchParams.set('before', beforeId);
+        if (limit) url.searchParams.set('limit', limit);
+
+        const response = await fetch(url, {
+            headers: { 'Authorization': `Bearer ${this.sessionToken}` }
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to fetch messages');
+        }
+
+        return await response.json();
     }
 }

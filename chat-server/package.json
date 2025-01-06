@@ -14,7 +14,6 @@
         "jsonwebtoken": "^8.5.1",
         "kafkajs": "^2.2.4",
         "node-zookeeper-client": "^1.1.0",
-        "uuid": "^11.0.3",
         "ws": "^8.2.3"
     }
 }

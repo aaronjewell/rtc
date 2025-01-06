@@ -1,33 +1,22 @@
 import { ChatServer } from './server.js';
 import { ServiceDiscovery } from './service-discovery.js';
 import { DAL } from './dal.js';
-import { v4 as uuidv4 } from 'uuid';
-
-const serverId = process.env.SERVER_ID + '-' + uuidv4();
-
-const serviceDiscovery = new ServiceDiscovery(serverId);
+import { IdGenerator } from './id-generator.js';
 
 try {
-    await serviceDiscovery.init();
-} catch (error) {
-    console.error('Failed to initialize service discovery:', error);
-    process.exit(1);
-}
+    const serviceDiscovery = new ServiceDiscovery();
+    const serverId = await serviceDiscovery.init();
+    console.log(`Assigned server ID: ${serverId}`);
 
-const dal = new DAL();
+    const idGenerator = new IdGenerator(serverId);
 
-try {
+    const dal = new DAL();
     await dal.init();
-} catch (error) {
-    console.error('Failed to initialize DAL:', error);
-    process.exit(1);
-}
 
-const server = new ChatServer(dal, serviceDiscovery, serverId);
-
-try {
-    await server.init()
+    // Create chat server with all dependencies
+    const server = new ChatServer(dal, serviceDiscovery, idGenerator, serverId);
+    await server.init();
 } catch (error) {
-    console.error('Failed to start chat server:', error);
+    console.error('Failed to initialize server:', error);
     process.exit(1);
 }

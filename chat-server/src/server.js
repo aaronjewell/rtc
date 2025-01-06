@@ -9,15 +9,16 @@ import { Redis } from 'ioredis';
 import { randomUUID } from 'crypto';
 
 export class ChatServer {
-    constructor(dal, serviceDiscovery, serverId) {
+    constructor(dal, serviceDiscovery, idGenerator, serverId) {
         this.app = express();
         this.server = http.createServer(this.app);
         this.wss = new WebSocketServer({ server: this.server });
 
-        this.serverId = serverId;
         this.clients = new Map();
         this.dal = dal;
         this.serviceDiscovery = serviceDiscovery;
+        this.idGenerator = idGenerator;
+        this.serverId = serverId;
 
         const kafka = new Kafka({
             clientId: `chat-server-${this.serverId}`,
@@ -62,33 +63,20 @@ export class ChatServer {
     #setupServer() {
         const port = process.env.PORT;
 
-        this.app.post('/dispatch-message', express.json(), (req, res) => {
-            const { messages } = req.body;
-            
-            if (Array.isArray(messages)) {
-                // Handle batch of messages
-                console.log(`Dispatching batch of ${messages.length} messages`);
-                Promise.all(messages.map(message => this.#deliverMessage(message)))
-                    .then(() => res.status(200).send('Messages dispatched'))
-                    .catch(error => {
-                        console.error('Error dispatching messages:', error);
-                        res.status(500).send('Failed to dispatch messages');
-                    });
-            } else {
-                // Handle single message for backward compatibility
-                const message = req.body;
-                console.log(`Dispatching single message to user ${message.target_user_id}`);
-                this.#deliverMessage(message)
-                    .then(() => res.status(200).send('Message dispatched'))
-                    .catch(error => {
-                        console.error('Error dispatching message:', error);
-                        res.status(500).send('Failed to dispatch message');
-                    });
+        this.app.post('/dispatch-message', express.json(), async (req, res) => {
+            const message = req.body;
+            console.log(`Dispatching message to user ${message.target_user_id}`);
+            try {
+                await this.#deliverMessage(message);
+                res.status(200).send('Message dispatched');
+            } catch (error) {
+                console.error('Error dispatching message:', error);
+                res.status(500).send('Failed to dispatch message');
             }
         });
 
         this.server.listen(port, () => {
-            console.log(`Chat server ${process.env.SERVER_ID} is running on port ${port}`);
+            console.log(`Chat server ${this.serverId} is running on port ${port}`);
         });
     }
 
@@ -128,7 +116,7 @@ export class ChatServer {
                     try {
                         await this.#handleMessage(userId, message);
                     } catch (error) {
-                        console.error('Error handling message:', error);
+                        console.error('Error handling message:', error, message.toString());
                         ws.send(JSON.stringify({
                             type: 'error',
                             error: 'Failed to process message'
@@ -180,8 +168,14 @@ export class ChatServer {
     }
 
     async #handleCreateChannel(userId, name, participants = []) {
+        // Using UUID v4 for channel IDs as they:
+        // 1. Don't need to be ordered like message IDs
+        // 2. Shouldn't be guessable/predictable for security
+        // 3. Can be generated without coordination
+        const channelId = randomUUID();
+        
         const channel = {
-            channel_id: randomUUID(),
+            channel_id: channelId,
             type: participants.length > 0 ? 'group' : 'direct',
             created_at: new Date(),
             metadata: {
@@ -307,32 +301,46 @@ export class ChatServer {
     }
 
     async #handleChatMessage(userId, channelId, content, metadata = {}) {
-        const message = await this.dal.storeMessage(channelId, userId, content, metadata);
-        console.log(`Storing message in channel ${channelId}`, JSON.stringify(message));
+        const messageId = this.idGenerator.generate();
 
-        // Get all participants for the channel
+        console.log(`Storing message ${messageId} for channel ${channelId}`);
+
+        const storedMessage = await this.dal.storeMessage(
+            channelId,
+            messageId,
+            userId,
+            content,
+            metadata
+        );
+
+        await this.broadcastToChannel(channelId, {
+            type: 'chat_message',
+            ...storedMessage
+        });
+    }
+
+    async broadcastToChannel(channelId, message) {
         const participants = await this.dal.getChannelParticipants(channelId);
         
-        // Fan out the message to each participant's partition
-        const queueMessages = participants.map(participant => ({
-            key: participant.user_id,
+        // Create a message for each participant's partition
+        const kafkaMessages = participants.map(participant => ({
+            key: participant.user_id, // Ensures messages for same user go to same partition
             value: JSON.stringify({
                 ...message,
-                sender_id: userId,
+                sender_id: message.user_id,
                 target_user_id: participant.user_id
             }),
             timestamp: Date.now()
         }));
 
-        // Send all messages in a single batch without transaction
         try {
             await this.producer.send({
                 topic: 'chat-messages',
-                messages: queueMessages,
-                timeout: 30000 // 30 second timeout for large batches
+                messages: kafkaMessages,
+                timeout: 30000
             });
         } catch (error) {
-            console.error('Failed to send messages:', error);
+            console.error('Failed to broadcast message:', error);
             throw error;
         }
     }
@@ -344,7 +352,7 @@ export class ChatServer {
     async #deliverMessage(message) {
         const ws = this.clients.get(message.target_user_id);
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ 
+            ws.send(JSON.stringify({
                 type: 'chat_message',
                 ...message,
                 user_id: message.sender_id  // Ensure the client sees the original sender
@@ -388,7 +396,7 @@ export class ChatServer {
             this.serviceDiscovery.close();
 
             await this.dal.close();
-            
+
             this.wss.clients.forEach((client) => {
                 client.close(1000, 'Server shutting down');
             });
@@ -401,5 +409,9 @@ export class ChatServer {
 
         process.on('SIGTERM', shutdown);
         process.on('SIGINT', shutdown);
+    }
+
+    async getChannelHistory(channelId, beforeId = null, limit = 50) {
+        return await this.dal.getChannelMessages(channelId, limit, beforeId);
     }
 }

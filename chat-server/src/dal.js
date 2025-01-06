@@ -1,4 +1,4 @@
-import { Client, types } from 'cassandra-driver';
+import { Client } from 'cassandra-driver';
 
 export class DAL {
     constructor() {
@@ -112,31 +112,34 @@ export class DAL {
     }
 
     // Message operations
-    async getChannelMessages(channelId, limit = 50) {
-        const result = await this.cassandra.execute(
-            'SELECT * FROM channel_messages WHERE channel_id = ? LIMIT ?',
-            [channelId, limit],
-            { prepare: true }
-        );
+    async getChannelMessages(channelId, limit = 50, beforeMessageId = null) {
+        let query = 'SELECT * FROM channel_messages WHERE channel_id = ?';
+        const params = [channelId];
+
+        if (beforeMessageId) {
+            query += ' AND message_id < ?';
+            params.push(beforeMessageId);
+        }
+
+        query += ' ORDER BY message_id DESC LIMIT ?';
+        params.push(limit);
+
+        const result = await this.cassandra.execute(query, params, { prepare: true });
         return result.rows;
     }
 
-    async storeMessage(channelId, userId, content, metadata = {}) {
-        const messageId = types.TimeUuid.now();
-        const timestamp = new Date();
+    async storeMessage(channelId, messageId, userId, content, metadata = {}) {
+        const query = 'INSERT INTO channel_messages (channel_id, message_id, user_id, content, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?)';
+        const params = [channelId, messageId, userId, content, new Date(), metadata];
 
-        await this.cassandra.execute(
-            'INSERT INTO channel_messages (channel_id, message_id, user_id, content, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?)',
-            [channelId, messageId, userId, content, timestamp, metadata],
-            { prepare: true }
-        );
+        await this.cassandra.execute(query, params, { prepare: true });
 
         return {
             channel_id: channelId,
             message_id: messageId,
             user_id: userId,
             content,
-            created_at: timestamp,
+            created_at: new Date(),
             metadata
         };
     }
