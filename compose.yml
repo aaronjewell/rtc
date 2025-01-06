@@ -46,6 +46,7 @@ services:
       dockerfile: Dockerfile
     environment:
       KV_STORE_HOST: kv-store
+      KV_KEYSPACE: chat_service
       NODE_ENV: ${NODE_ENV}
       PORT: 80
       JWT_SECRET_FILE: /run/secrets/jwt_secret
@@ -60,6 +61,8 @@ services:
     secrets:
       - jwt_secret
     depends_on:
+      chat-server-migrate:
+        condition: service_completed_successfully
       kafka:
         condition: service_healthy
       kv-store:
@@ -68,6 +71,18 @@ services:
         condition: service_healthy
       service-discovery:
         condition: service_started
+
+  chat-server-migrate:
+    build:
+      context: ./chat-server
+      dockerfile: Dockerfile.migrate
+    environment:
+      KV_STORE_HOST: kv-store
+      KV_KEYSPACE: chat_service
+    depends_on:
+      kv-store:
+        condition: service_healthy
+    restart: "no"  # Run once and exit
 
   presence-server:
     build:
@@ -185,10 +200,15 @@ services:
         /usr/bin/kafka-topics --create --if-not-exists \
           --bootstrap-server kafka:9092 \
           --topic chat-messages \
-          --partitions 6 \
+          --partitions 12 \
           --replication-factor 1 \
-          --config cleanup.policy=delete
-      '
+          --config cleanup.policy=delete \
+          --config retention.ms=3600000 \
+          --config retention.bytes=524288000 \
+          --config delete.retention.ms=60000 \
+          --config min.compaction.lag.ms=0 \
+          --config segment.ms=300000 \
+          --config message.timestamp.type=CreateTime'
 
   message-dispatcher:
     build:
@@ -200,7 +220,7 @@ services:
       SERVICE_DISCOVERY_HOST: service-discovery:2181
     depends_on:
       kafka-setup:
-        condition: service_started
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 

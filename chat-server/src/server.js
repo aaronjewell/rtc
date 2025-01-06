@@ -4,8 +4,9 @@ import http from 'http';
 import ip from 'ip';
 import { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
-import { Kafka } from 'kafkajs';
+import { Kafka, Partitioners } from 'kafkajs';
 import { Redis } from 'ioredis';
+import { randomUUID } from 'crypto';
 
 export class ChatServer {
     constructor(dal, serviceDiscovery, serverId) {
@@ -20,9 +21,24 @@ export class ChatServer {
 
         const kafka = new Kafka({
             clientId: `chat-server-${this.serverId}`,
-            brokers: [process.env.KAFKA_BROKER]
+            brokers: [process.env.KAFKA_BROKER],
+            producer: {
+                maxInFlightRequests: 5,
+                idempotent: true,
+                acks: 1, // Only wait for leader acknowledgment for better throughput
+                compression: 'snappy', // Faster than gzip
+                createPartitioner: Partitioners.LegacyPartitioner,
+                partitionerConfig: {
+                    maxRandomBytes: 0
+                },
+                // Add batching configuration
+                batchSize: 16384, // 16KB
+                linger: 50 // 50ms to allow batching
+            }
         });
-        this.producer = kafka.producer();
+        this.producer = kafka.producer({
+            allowAutoTopicCreation: false
+        });
 
         this.redis = new Redis({
             host: process.env.REDIS_HOST,
@@ -47,12 +63,28 @@ export class ChatServer {
         const port = process.env.PORT;
 
         this.app.post('/dispatch-message', express.json(), (req, res) => {
-            const message = req.body;
-            console.log(`Dispatching message to ${message.user_id}`, message);
-
-            this.#deliverMessage(message);
-
-            res.status(200).send('Message dispatched');
+            const { messages } = req.body;
+            
+            if (Array.isArray(messages)) {
+                // Handle batch of messages
+                console.log(`Dispatching batch of ${messages.length} messages`);
+                Promise.all(messages.map(message => this.#deliverMessage(message)))
+                    .then(() => res.status(200).send('Messages dispatched'))
+                    .catch(error => {
+                        console.error('Error dispatching messages:', error);
+                        res.status(500).send('Failed to dispatch messages');
+                    });
+            } else {
+                // Handle single message for backward compatibility
+                const message = req.body;
+                console.log(`Dispatching single message to user ${message.target_user_id}`);
+                this.#deliverMessage(message)
+                    .then(() => res.status(200).send('Message dispatched'))
+                    .catch(error => {
+                        console.error('Error dispatching message:', error);
+                        res.status(500).send('Failed to dispatch message');
+                    });
+            }
         });
 
         this.server.listen(port, () => {
@@ -61,7 +93,7 @@ export class ChatServer {
     }
 
     #setupWebSocket() {
-        this.rooms = new Map();
+        this.subscribedChannels = new Map(); // userId -> Set of channelIds
 
         this.wss.on('connection', async (ws, req) => {
             try {
@@ -75,6 +107,7 @@ export class ChatServer {
                 const userId = decoded.username;
 
                 this.clients.set(userId, ws);
+                this.subscribedChannels.set(userId, new Set());
 
                 console.log(`Client connected: ${userId}`);
 
@@ -83,6 +116,13 @@ export class ChatServer {
                     host: ip.address(),
                     port: process.env.PORT
                 });
+
+                // Send user's channels on connect
+                const channels = await this.dal.getUserChannels(userId);
+                ws.send(JSON.stringify({
+                    type: 'channels_list',
+                    channels
+                }));
 
                 ws.on('message', async (message) => {
                     try {
@@ -98,15 +138,8 @@ export class ChatServer {
 
                 ws.on('close', async () => {
                     this.clients.delete(userId);
+                    this.subscribedChannels.delete(userId);
                     console.log(`Client disconnected: ${userId}`);
-
-                    for (const [roomId, users] of this.rooms) {
-                        if (users.has(userId)) {
-                            users.delete(userId);
-                            await this.redis.srem(`room:${roomId}`, userId);
-                        }
-                    }
-
                     await this.redis.del(`user:${userId}`);
                 });
 
@@ -121,67 +154,205 @@ export class ChatServer {
         const data = JSON.parse(message);
 
         switch (data.type) {
-            case 'join_room':
-                await this.#handleJoinRoom(userId, data.roomId);
+            case 'create_channel':
+                await this.#handleCreateChannel(userId, data.name, data.participants);
+                break;
+
+            case 'join_channel':
+                await this.#handleJoinChannel(userId, data.channelId);
+                break;
+
+            case 'leave_channel':
+                await this.#handleLeaveChannel(userId, data.channelId);
                 break;
 
             case 'chat_message':
-                await this.#handleChatMessage(userId, data.roomId, data.content);
+                await this.#handleChatMessage(userId, data.channelId, data.content, data.metadata);
                 break;
 
-            case 'typing':
-                // TODO: Implement this
+            case 'mark_channel_read':
+                await this.#handleMarkChannelRead(userId, data.channelId);
                 break;
 
             default:
-                throw new Error('Unknown message type');
+                throw new Error(`Unknown message type: ${data.type}`);
         }
     }
 
-    async #handleJoinRoom(userId, roomId) {
-        const room = await this.dal.getRoom(roomId);
+    async #handleCreateChannel(userId, name, participants = []) {
+        const channel = {
+            channel_id: randomUUID(),
+            type: participants.length > 0 ? 'group' : 'direct',
+            created_at: new Date(),
+            metadata: {
+                creator_id: userId,
+                name: name || 'Unnamed Channel'
+            }
+        };
 
-        if (!room) {
-            throw new Error('Room not found');
+        await this.dal.createChannel(channel);
+
+        // Add creator as first participant
+        await this.dal.addChannelParticipant(channel.channel_id, userId, 'admin');
+
+        // Add other participants if provided
+        for (const participantId of participants) {
+            await this.dal.addChannelParticipant(channel.channel_id, participantId, 'member');
         }
 
-        if (!this.rooms.has(roomId)) {
-            this.rooms.set(roomId, new Set());
+        // Add channel to user_channels for all participants
+        const allParticipants = [userId, ...participants];
+        for (const participantId of allParticipants) {
+            await this.dal.addUserToChannel(
+                participantId,
+                channel.channel_id,
+                channel.type,
+                name || 'Unnamed Channel',
+                channel.type === 'direct',
+                Array.from(new Set(allParticipants.filter(id => id !== participantId)))
+            );
         }
 
-        this.rooms.get(roomId).add(userId);
+        // Notify creator of success
+        const ws = this.clients.get(userId);
+        if (ws) {
+            ws.send(JSON.stringify({
+                type: 'channel_created',
+                channel: {
+                    ...channel,
+                    participants: allParticipants
+                }
+            }));
+        }
 
-        const messages = await this.dal.getRecentMessages(roomId);
+        // Auto-join the creator to the channel
+        await this.#handleJoinChannel(userId, channel.channel_id);
+    }
 
-        await this.redis.sadd(`room:${roomId}`, userId);
+    async #handleJoinChannel(userId, channelId) {
+        const channel = await this.dal.getChannel(channelId);
+        if (!channel) {
+            throw new Error('Channel not found');
+        }
+
+        const userChannels = this.subscribedChannels.get(userId);
+        if (userChannels) {
+            userChannels.add(channelId);
+        }
+
+        const messages = await this.dal.getChannelMessages(channelId);
+        const participants = await this.dal.getChannelParticipants(channelId);
 
         const ws = this.clients.get(userId);
         if (ws) {
             ws.send(JSON.stringify({
-                type: 'room_history',
-                roomId,
-                messages: messages.reverse()
+                type: 'channel_joined',
+                channelId,
+                messages: messages.reverse(),
+                participants
             }));
         }
     }
 
-    async #handleChatMessage(userId, roomId, content) {
-        const message = await this.dal.storeMessage(roomId, userId, content);
+    async #handleLeaveChannel(userId, channelId) {
+        await this.dal.removeChannelParticipant(channelId, userId);
+        await this.dal.removeUserChannel(userId, channelId);
 
-        console.log(`Delivering message to room ${roomId}`, JSON.stringify(message));
+        const userChannels = this.subscribedChannels.get(userId);
+        if (userChannels) {
+            userChannels.delete(channelId);
+        }
 
-        await this.producer.send({
-            topic: 'chat-messages',
-            messages: [{ key: roomId, value: JSON.stringify(message) }]
-        });
+        const ws = this.clients.get(userId);
+        if (ws) {
+            ws.send(JSON.stringify({
+                type: 'channel_left',
+                channelId
+            }));
+        }
+
+        const participants = await this.dal.getChannelParticipants(channelId);
+        const message = {
+            channel_id: channelId,
+            type: 'system',
+            content: `${userId} has left the channel`,
+            created_at: new Date(),
+            metadata: {
+                event: 'user_left',
+                user_id: userId
+            }
+        };
+
+        // Fan out the system message to remaining participants
+        const queueMessages = participants.map(participant => ({
+            key: participant.user_id,
+            value: JSON.stringify({
+                ...message,
+                sender_id: 'system',
+                target_user_id: participant.user_id
+            }),
+            timestamp: Date.now()
+        }));
+
+        try {
+            await this.producer.send({
+                topic: 'chat-messages',
+                messages: queueMessages,
+                timeout: 30000
+            });
+        } catch (error) {
+            console.error('Failed to send leave notification:', error);
+            // Don't throw here as the main leave operation was successful
+        }
+    }
+
+    async #handleChatMessage(userId, channelId, content, metadata = {}) {
+        const message = await this.dal.storeMessage(channelId, userId, content, metadata);
+        console.log(`Storing message in channel ${channelId}`, JSON.stringify(message));
+
+        // Get all participants for the channel
+        const participants = await this.dal.getChannelParticipants(channelId);
+        
+        // Fan out the message to each participant's partition
+        const queueMessages = participants.map(participant => ({
+            key: participant.user_id,
+            value: JSON.stringify({
+                ...message,
+                sender_id: userId,
+                target_user_id: participant.user_id
+            }),
+            timestamp: Date.now()
+        }));
+
+        // Send all messages in a single batch without transaction
+        try {
+            await this.producer.send({
+                topic: 'chat-messages',
+                messages: queueMessages,
+                timeout: 30000 // 30 second timeout for large batches
+            });
+        } catch (error) {
+            console.error('Failed to send messages:', error);
+            throw error;
+        }
+    }
+
+    async #handleMarkChannelRead(userId, channelId) {
+        await this.dal.updateUserChannelLastRead(userId, channelId);
     }
 
     async #deliverMessage(message) {
-        const ws = this.clients.get(message.user_id);
+        const ws = this.clients.get(message.target_user_id);
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'chat_message', ...message }));
+            ws.send(JSON.stringify({ 
+                type: 'chat_message',
+                ...message,
+                user_id: message.sender_id  // Ensure the client sees the original sender
+            }));
+            return true;
         } else {
-            console.error(`Failed to deliver message to ${message.user_id}`, message);
+            console.log(`User ${message.target_user_id} not connected to this server or connection not open`);
+            return false;
         }
     }
 

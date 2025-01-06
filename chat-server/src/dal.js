@@ -5,6 +5,7 @@ export class DAL {
         this.cassandra = new Client({
             contactPoints: [process.env.KV_STORE_HOST],
             localDataCenter: 'datacenter1',
+            keyspace: process.env.KV_KEYSPACE,
             protocolOptions: { port: 9042 },
             socketOptions: {
                 readTimeout: 60000,
@@ -23,43 +24,9 @@ export class DAL {
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 console.log(`Attempting to connect to Cassandra (attempt ${attempt}/${maxRetries})...`);
-
-                const queries = [
-                    `CREATE KEYSPACE IF NOT EXISTS chat_system 
-                     WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}`,
-
-                    `USE chat_system;`,
-
-                    `CREATE TABLE IF NOT EXISTS chat_system.messages (
-                        room_id text,
-                        message_id timeuuid,
-                        user_id text,
-                        content text,
-                        timestamp timestamp,
-                        PRIMARY KEY ((room_id), message_id)
-                    ) WITH CLUSTERING ORDER BY (message_id DESC)`,
-
-                    `CREATE TABLE IF NOT EXISTS chat_system.rooms (
-                        room_id text PRIMARY KEY,
-                        name text,
-                        created_at timestamp
-                    )`
-                ];
-
-                // Test connection first
                 await this.cassandra.connect();
                 console.log('Connected to Cassandra successfully');
-
-                // Execute schema creation queries
-                for (const query of queries) {
-                    await this.cassandra.execute(query);
-                }
-
-                console.log('Cassandra schema initialized successfully');
-
-                await this.#seed();
-
-                console.log('Cassandra seed data inserted successfully');
+                break;
             } catch (error) {
                 console.error(`Failed to connect to Cassandra (attempt ${attempt}/${maxRetries}):`, error.message);
 
@@ -67,68 +34,119 @@ export class DAL {
                     throw new Error(`Failed to connect to Cassandra after ${maxRetries} attempts`);
                 }
 
-                // Wait before retrying
                 await new Promise(resolve => setTimeout(resolve, retryDelay));
             }
         }
     }
 
-    async #seed() {
-        if (process.env.NODE_ENV === 'development') {
-            const existingRooms = await this.cassandra.execute(
-                'SELECT * FROM chat_system.rooms WHERE room_id = ?',
-                ['test-room'],
-                { prepare: true }
-            );
-
-            if (existingRooms.rows.length === 0) {
-                const queries = [
-                    `INSERT INTO chat_system.rooms (room_id, name, created_at) VALUES ('test-room', 'Test Room', toTimestamp(now()))`
-                ];
-
-                for (const query of queries) {
-                    await this.cassandra.execute(query);
-                }
-            }
-        }
-    }
-
-    async getRoom(roomId) {
+    // Channel operations
+    async getChannel(channelId) {
         const result = await this.cassandra.execute(
-            'SELECT * FROM chat_system.rooms WHERE room_id = ?',
-            [roomId],
+            'SELECT * FROM channels WHERE channel_id = ?',
+            [channelId],
             { prepare: true }
         );
-
-        return result.rows.length > 0 ? result.rows[0] : null;
+        return result.first();
     }
 
-    async getRecentMessages(roomId, limit = 50) {
-        const result = await this.cassandra.execute(
-            'SELECT * FROM chat_system.messages WHERE room_id = ? LIMIT ?',
-            [roomId, limit],
+    async createChannel(channel) {
+        const { channel_id, type, metadata } = channel;
+        await this.cassandra.execute(
+            'INSERT INTO channels (channel_id, type, created_at, metadata) VALUES (?, ?, toTimestamp(now()), ?)',
+            [channel_id, type, metadata],
             { prepare: true }
         );
+        return this.getChannel(channel_id);
+    }
 
+    // User channels operations
+    async getUserChannels(userId, limit = 50) {
+        const result = await this.cassandra.execute(
+            'SELECT * FROM user_channels WHERE user_id = ? LIMIT ?',
+            [userId, limit],
+            { prepare: true }
+        );
         return result.rows;
     }
 
-    async storeMessage(roomId, userId, content) {
+    async addUserToChannel(userId, channelId, channelType, channelName, isDirect, otherParticipants) {
+        await this.cassandra.execute(
+            'INSERT INTO user_channels (user_id, channel_id, last_read_at, channel_type, channel_name, is_direct, other_participants) VALUES (?, ?, toTimestamp(now()), ?, ?, ?, ?)',
+            [userId, channelId, channelType, channelName, isDirect, otherParticipants],
+            { prepare: true }
+        );
+    }
+
+    async updateUserChannelLastRead(userId, channelId) {
+        await this.cassandra.execute(
+            'UPDATE user_channels SET last_read_at = toTimestamp(now()) WHERE user_id = ? AND channel_id = ?',
+            [userId, channelId],
+            { prepare: true }
+        );
+    }
+
+    async removeUserChannel(userId, channelId) {
+        await this.cassandra.execute(
+            'DELETE FROM user_channels WHERE user_id = ? AND channel_id = ?',
+            [userId, channelId],
+            { prepare: true }
+        );
+    }
+
+    // Channel participants operations
+    async getChannelParticipants(channelId) {
+        const result = await this.cassandra.execute(
+            'SELECT * FROM channel_participants WHERE channel_id = ?',
+            [channelId],
+            { prepare: true }
+        );
+        return result.rows;
+    }
+
+    async addChannelParticipant(channelId, userId, role = 'member') {
+        await this.cassandra.execute(
+            'INSERT INTO channel_participants (channel_id, user_id, joined_at, role) VALUES (?, ?, toTimestamp(now()), ?)',
+            [channelId, userId, role],
+            { prepare: true }
+        );
+    }
+
+    // Message operations
+    async getChannelMessages(channelId, limit = 50) {
+        const result = await this.cassandra.execute(
+            'SELECT * FROM channel_messages WHERE channel_id = ? LIMIT ?',
+            [channelId, limit],
+            { prepare: true }
+        );
+        return result.rows;
+    }
+
+    async storeMessage(channelId, userId, content, metadata = {}) {
         const messageId = types.TimeUuid.now();
+        const timestamp = new Date();
 
         await this.cassandra.execute(
-            'INSERT INTO chat_system.messages (room_id, message_id, user_id, content, timestamp) VALUES (?, ?, ?, ?, toTimestamp(now()))',
-            [roomId, messageId, userId, content],
+            'INSERT INTO channel_messages (channel_id, message_id, user_id, content, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?)',
+            [channelId, messageId, userId, content, timestamp, metadata],
             { prepare: true }
         );
 
-        const result = await this.cassandra.execute(
-            'SELECT * FROM chat_system.messages WHERE room_id = ? AND message_id = ?',
-            [roomId, messageId],
+        return {
+            channel_id: channelId,
+            message_id: messageId,
+            user_id: userId,
+            content,
+            created_at: timestamp,
+            metadata
+        };
+    }
+
+    async removeChannelParticipant(channelId, userId) {
+        await this.cassandra.execute(
+            'DELETE FROM channel_participants WHERE channel_id = ? AND user_id = ?',
+            [channelId, userId],
             { prepare: true }
         );
-
-        return result.first();
     }
 
     async close() {

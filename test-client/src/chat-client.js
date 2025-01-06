@@ -5,11 +5,12 @@ export class ChatClient extends EventEmitter {
     constructor(config) {
         super();
         this.config = config;
-        this.currentRoom = null;
+        this.currentChannel = null;
         this.chatWs = null;
         this.presenceWs = null;
         this.sessionToken = null;
         this.heartbeatInterval = null;
+        this.channels = new Map(); // channelId -> channel info
     }
 
     async connect() {
@@ -98,14 +99,42 @@ export class ChatClient extends EventEmitter {
 
     handleChatMessage(message) {
         switch (message.type) {
-            case 'chat_message':
-                this.emit('message', message);
+            case 'channels_list':
+                this.channels.clear();
+                message.channels.forEach(channel => {
+                    this.channels.set(channel.channel_id, channel);
+                });
+                this.emit('channels_updated', Array.from(this.channels.values()));
                 break;
 
-            case 'room_history':
-                message.messages.forEach(msg => {
-                    this.emit('message', msg);
+            case 'channel_created':
+                this.channels.set(message.channel.channel_id, message.channel);
+                this.emit('channel_created', message.channel);
+                break;
+
+            case 'chat_message':
+                this.emit('message', {
+                    channelId: message.channel_id,
+                    userId: message.user_id,
+                    content: message.content,
+                    timestamp: message.created_at
                 });
+                break;
+
+            case 'channel_joined':
+                this.currentChannel = message.channelId;
+                this.emit('channel_joined', {
+                    channelId: message.channelId,
+                    messages: message.messages,
+                    participants: message.participants
+                });
+                break;
+
+            case 'channel_left':
+                if (this.currentChannel === message.channelId) {
+                    this.currentChannel = null;
+                }
+                this.emit('channel_left', message.channelId);
                 break;
 
             case 'error':
@@ -128,31 +157,53 @@ export class ChatClient extends EventEmitter {
         }
     }
 
-    async joinRoom(roomId) {
+    async joinChannel(channelId) {
         if (!this.chatWs) {
             throw new Error('Not connected to chat server');
         }
 
-        this.currentRoom = roomId;
         this.chatWs.send(JSON.stringify({
-            type: 'join_room',
-            roomId
+            type: 'join_channel',
+            channelId
         }));
     }
 
-    async sendMessage(content) {
+    async leaveChannel(channelId) {
         if (!this.chatWs) {
             throw new Error('Not connected to chat server');
         }
 
-        if (!this.currentRoom) {
-            throw new Error('Join a room first');
+        this.chatWs.send(JSON.stringify({
+            type: 'leave_channel',
+            channelId
+        }));
+    }
+
+    async sendMessage(content, metadata = {}) {
+        if (!this.chatWs) {
+            throw new Error('Not connected to chat server');
+        }
+
+        if (!this.currentChannel) {
+            throw new Error('Join a channel first');
         }
 
         this.chatWs.send(JSON.stringify({
             type: 'chat_message',
-            roomId: this.currentRoom,
-            content
+            channelId: this.currentChannel,
+            content,
+            metadata
+        }));
+    }
+
+    async markChannelRead(channelId) {
+        if (!this.chatWs) {
+            throw new Error('Not connected to chat server');
+        }
+
+        this.chatWs.send(JSON.stringify({
+            type: 'mark_channel_read',
+            channelId
         }));
     }
 
@@ -187,5 +238,17 @@ export class ChatClient extends EventEmitter {
         if (this.presenceWs) {
             this.presenceWs.close();
         }
+    }
+
+    async createChannel(name, participants = []) {
+        if (!this.chatWs) {
+            throw new Error('Not connected to chat server');
+        }
+
+        this.chatWs.send(JSON.stringify({
+            type: 'create_channel',
+            name,
+            participants
+        }));
     }
 }
