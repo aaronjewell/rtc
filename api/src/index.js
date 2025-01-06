@@ -28,7 +28,3 @@ try {
     console.error('Failed to initialize API:', error);
     process.exit(1);
 }
-
-server.app.listen(port, () => {
-    console.log(`API listening on port ${port}`);
-});

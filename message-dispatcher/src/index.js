@@ -1,20 +1,119 @@
 import { Kafka } from 'kafkajs';
 import { Redis } from 'ioredis';
+import { ServiceDiscovery } from './service-discovery.js';
+import express from 'express';
 
-const kafka = new Kafka({
-    clientId: 'message-dispatcher',
-    brokers: [process.env.KAFKA_BROKER]
-});
+let serverId;
 
-const consumer = kafka.consumer({ 
-    groupId: 'message-dispatcher-group',
-    sessionTimeout: 30000,
-    heartbeatInterval: 3000
-});
+async function checkHealth(redis, consumer, serviceDiscovery) {
+    const health = {
+        status: 'ok',
+        serverId,
+        timestamp: new Date().toISOString(),
+        components: {
+            kafka: 'unknown',
+            redis: 'unknown',
+            zookeeper: 'unknown'
+        }
+    };
 
-const redis = new Redis(process.env.REDIS_HOST);
+    try {
+        // Check Redis
+        const redisStatus = await redis.ping();
+        health.components.redis = redisStatus === 'PONG' ? 'ok' : 'error';
+    } catch (error) {
+        health.components.redis = 'error';
+        health.status = 'error';
+        console.error('Redis health check failed', { error: error.message });
+    }
 
-async function dispatchMessage(message) {
+    try {
+        // Check Kafka consumer
+        const isConnected = consumer.connection?.connected ?? false;
+        health.components.kafka = isConnected ? 'ok' : 'error';
+        if (!isConnected) {
+            health.status = 'error';
+        }
+    } catch (error) {
+        health.components.kafka = 'error';
+        health.status = 'error';
+        console.error('Kafka health check failed', { error: error.message });
+    }
+
+    try {
+        // Check ZooKeeper
+        const zkState = serviceDiscovery.getState();
+        health.components.zookeeper = zkState === 'SYNC_CONNECTED' ? 'ok' : 'error';
+        if (health.components.zookeeper !== 'ok') {
+            health.status = 'error';
+        }
+    } catch (error) {
+        health.components.zookeeper = 'error';
+        health.status = 'error';
+        console.error('ZooKeeper health check failed', { error: error.message });
+    }
+
+    return health;
+}
+
+async function initialize() {
+    const serviceDiscovery = new ServiceDiscovery();
+    serverId = await serviceDiscovery.init();
+    console.info('Initialized message dispatcher', { serverId });
+
+    const kafka = new Kafka({
+        clientId: `message-dispatcher-${serverId}`,
+        brokers: [process.env.KAFKA_BROKER]
+    });
+
+    const consumer = kafka.consumer({ 
+        groupId: 'message-dispatcher-group',
+        sessionTimeout: 30000,
+        heartbeatInterval: 3000,
+        rebalanceTimeout: 60000,
+        maxWaitTimeInMs: 50,
+        maxBytesPerPartition: 1048576,
+        retry: {
+            initialRetryTime: 100,
+            retries: 8
+        }
+    });
+
+    const redis = new Redis(process.env.REDIS_HOST);
+
+    let server = null;
+    try {
+        // Setup express server for health checks
+        const app = express();
+        app.get('/health', async (req, res) => {
+            const health = await checkHealth(redis, consumer, serviceDiscovery);
+            res.status(health.status === 'ok' ? 200 : 503).json(health);
+        });
+        
+        server = app.listen(process.env.PORT, () => {
+            console.log(`Health check server started on port ${process.env.PORT}`);
+        });
+
+        server.on('error', (error) => {
+            console.error('Health check server error', { 
+                error: error.message,
+                stack: error.stack 
+            });
+            // Don't fail initialization if health check server fails
+            server = null;
+        });
+    } catch (error) {
+        console.error('Failed to start health check server', { 
+            error: error.message,
+            stack: error.stack 
+        });
+        // Continue without health check server
+    }
+
+    return { kafka, consumer, redis, serviceDiscovery, server };
+}
+
+async function dispatchMessage(message, redis) {
     try {
         const messageData = JSON.parse(message.value.toString());
         const { target_user_id } = messageData;
@@ -24,6 +123,8 @@ async function dispatchMessage(message) {
             console.log(`No server found for user ${target_user_id}`);
             return;
         }
+
+        console.log(`Dispatching message to server ${serverInfo.host}:${serverInfo.port}`);
 
         const response = await fetch(`http://${serverInfo.host}:${serverInfo.port}/dispatch-message`, {
             method: 'POST',
@@ -40,14 +141,50 @@ async function dispatchMessage(message) {
 }
 
 async function run() {
-    await consumer.connect();
-    await consumer.subscribe({ topic: 'chat-messages', fromBeginning: false });
+    try {
+        const { consumer, redis, serviceDiscovery, server } = await initialize();
+        
+        await consumer.connect();
+        console.log('Connected to Kafka');
 
-    await consumer.run({
-        eachMessage: async ({ message }) => {
-            await dispatchMessage(message);
-        }
-    });
+        await consumer.subscribe({ 
+            topic: 'chat-messages', 
+            fromBeginning: false
+        });
+
+        await consumer.run({
+            autoCommit: true,
+            autoCommitInterval: 5000,
+            autoCommitThreshold: 100,
+            eachMessage: async ({ message }) => {
+                await dispatchMessage(message, redis);
+            }
+        });
+
+        console.log(`Message dispatcher ${serverId} is running`);
+
+        // Graceful shutdown
+        const shutdown = async () => {
+            console.log(`Shutting down message dispatcher ${serverId}...`);
+            try {
+                await consumer.disconnect();
+                redis.disconnect();
+                serviceDiscovery.close();
+                server.close();
+                process.exit(0);
+            } catch (error) {
+                console.error('Error during shutdown:', error);
+                process.exit(1);
+            }
+        };
+
+        process.on('SIGTERM', shutdown);
+        process.on('SIGINT', shutdown);
+
+    } catch (error) {
+        console.error('Failed to start message dispatcher:', error);
+        process.exit(1);
+    }
 }
 
 run().catch(console.error);

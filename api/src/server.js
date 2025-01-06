@@ -6,6 +6,7 @@ import jwt from 'jsonwebtoken';
 export class API {
     constructor(dal, serviceDiscovery) {
         this.app = express();
+        this.server = null;
         this.dal = dal;
         this.serviceDiscovery = serviceDiscovery;
 
@@ -16,6 +17,11 @@ export class API {
 
     async init() {
         this.JWT_SECRET = await fs.readFile(process.env.JWT_SECRET_FILE, 'utf8');
+
+
+        this.server = this.app.listen(process.env.PORT, () => {
+            console.log(`API listening on port ${process.env.PORT}`);
+        });
     }
 
     #registerMiddleware() {
@@ -172,7 +178,7 @@ export class API {
 
             await this.dal.close();
 
-            this.app.close(() => {
+            this.server.close(() => {
                 console.log('API shutdown complete');
                 process.exit(0);
             });

@@ -215,14 +215,33 @@ services:
       context: ./message-dispatcher
       dockerfile: Dockerfile
     environment:
+      NODE_ENV: ${NODE_ENV}
+      PORT: 8080
       KAFKA_BROKER: kafka:9092
       REDIS_HOST: redis
       SERVICE_DISCOVERY_HOST: service-discovery:2181
+      SERVER_ID: "message-dispatcher"
+    deploy:
+      mode: replicated
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f \"http://localhost:$$PORT/health\" | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     depends_on:
       kafka-setup:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      service-discovery:
+        condition: service_started
 
   redis:
     image: redis:6
