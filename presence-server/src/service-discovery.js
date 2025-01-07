@@ -2,7 +2,8 @@ import zookeeper from 'node-zookeeper-client';
 import ip from 'ip';
 
 export class ServiceDiscovery {
-    constructor() {
+    constructor(logger) {
+        this.logger = logger;
         this.client = zookeeper.createClient(process.env.SERVICE_DISCOVERY_HOST);
         this.basePath = '/presence-service';
         this.serverIdPath = '/presence-service/server-ids';
@@ -13,7 +14,7 @@ export class ServiceDiscovery {
     async init() {
         return new Promise((resolve, reject) => {
             this.client.once('connected', async () => {
-                console.log('Connected to Zookeeper');
+                this.logger.info('Connected to Zookeeper');
                 try {
                     await this.ensurePaths();
                     this.serverId = await this.claimServerId();
@@ -25,7 +26,7 @@ export class ServiceDiscovery {
             });
 
             this.client.on('error', (error) => {
-                console.error('Zookeeper connection error:', error);
+                this.logger.error('Zookeeper connection error:', { error });
                 reject(error);
             });
 
@@ -56,7 +57,7 @@ export class ServiceDiscovery {
         const seq = parseInt(path.split('-').pop(), 10);
         const serverId = seq % (this.MAX_SERVER_ID + 1);
         
-        console.log(`Claimed server ID ${serverId} (sequence: ${seq}, path: ${path})`);
+        this.logger.info(`Claimed server ID ${serverId} (sequence: ${seq}, path: ${path})`);
         return serverId;
     }
 
@@ -75,9 +76,9 @@ export class ServiceDiscovery {
                 Buffer.from(serverData), 
                 zookeeper.CreateMode.EPHEMERAL
             );
-            console.log(`Registered presence server ${this.serverId} in Zookeeper`);
+            this.logger.info(`Registered presence server ${this.serverId} in Zookeeper`);
         } catch (error) {
-            console.error('Failed to register with Zookeeper:', error);
+            this.logger.error('Failed to register with Zookeeper:', { error });
             throw error;
         }
     }

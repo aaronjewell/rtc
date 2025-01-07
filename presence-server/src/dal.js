@@ -1,7 +1,8 @@
 import { Client } from 'cassandra-driver';
 
 export class DAL {
-    constructor() {
+    constructor(logger) {
+        this.logger = logger;
         this.cassandra = new Client({
             contactPoints: [process.env.KV_STORE_HOST],
             localDataCenter: 'datacenter1',
@@ -22,7 +23,10 @@ export class DAL {
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                console.log(`Attempting to connect to Cassandra (attempt ${attempt}/${maxRetries})...`);
+                this.logger.info('Attempting to connect to Cassandra', { 
+                    attempt,
+                    maxRetries 
+                });
                 
                 const queries = [
                     `CREATE KEYSPACE IF NOT EXISTS presence_system 
@@ -50,17 +54,21 @@ export class DAL {
                 ];
 
                 await this.cassandra.connect();
-                console.log('Connected to Cassandra successfully');
+                this.logger.info('Connected to Cassandra successfully');
 
                 for (const query of queries) {
                     await this.cassandra.execute(query);
                 }
                 
-                console.log('Cassandra schema initialized successfully');
+                this.logger.info('Cassandra schema initialized successfully');
                 return;
 
             } catch (error) {
-                console.error(`Failed to connect to Cassandra (attempt ${attempt}/${maxRetries}):`, error.message);
+                this.logger.error('Failed to connect to Cassandra', {
+                    error,
+                    attempt,
+                    maxRetries
+                });
                 
                 if (attempt === maxRetries) {
                     throw new Error(`Failed to connect to Cassandra after ${maxRetries} attempts`);
@@ -72,50 +80,96 @@ export class DAL {
     }
 
     async updatePresence(userId, status, deviceInfo, serverId) {
-        const query = `
-            INSERT INTO presence_system.user_presence 
-            (user_id, status, last_seen, device_info, server_id) 
-            VALUES (?, ?, toTimestamp(now()), ?, ?)
-        `;
-        
-        await this.cassandra.execute(query, [
-            userId,
-            status,
-            deviceInfo,
-            serverId
-        ], { prepare: true });
+        try {
+            const query = `
+                INSERT INTO presence_system.user_presence 
+                (user_id, status, last_seen, device_info, server_id) 
+                VALUES (?, ?, toTimestamp(now()), ?, ?)
+            `;
+            
+            await this.cassandra.execute(query, [
+                userId,
+                status,
+                deviceInfo,
+                serverId
+            ], { prepare: true });
 
-        // Store in history
-        await this.cassandra.execute(`
-            INSERT INTO presence_system.user_status_history 
-            (user_id, timestamp, status) 
-            VALUES (?, toTimestamp(now()), ?)
-        `, [userId, status], { prepare: true });
+            // Store in history
+            await this.cassandra.execute(`
+                INSERT INTO presence_system.user_status_history 
+                (user_id, timestamp, status) 
+                VALUES (?, toTimestamp(now()), ?)
+            `, [userId, status], { prepare: true });
+
+            this.logger.debug('Presence updated in database', { 
+                userId, 
+                status,
+                deviceInfo,
+                serverId
+            });
+        } catch (error) {
+            this.logger.error('Failed to update presence', { 
+                error,
+                userId,
+                status
+            });
+            throw error;
+        }
     }
 
     async getPresenceData(userIds) {
-        const query = `
-            SELECT user_id, status, last_seen 
-            FROM presence_system.user_presence 
-            WHERE user_id IN ?
-        `;
-        
-        const result = await this.cassandra.execute(query, [userIds], { prepare: true });
-        return result.rows;
+        try {
+            const query = `
+                SELECT user_id, status, last_seen 
+                FROM presence_system.user_presence 
+                WHERE user_id IN ?
+            `;
+            
+            const result = await this.cassandra.execute(query, [userIds], { prepare: true });
+            this.logger.debug('Retrieved presence data', { 
+                userCount: userIds.length,
+                resultsFound: result.rows.length
+            });
+            return result.rows;
+        } catch (error) {
+            this.logger.error('Failed to get presence data', { 
+                error,
+                userIds
+            });
+            throw error;
+        }
     }
 
     async getUsersByStatus(status) {
-        const query = `
-            SELECT user_id, status, last_seen 
-            FROM presence_system.user_presence 
-            WHERE status = ?
-        `;
-        
-        const result = await this.cassandra.execute(query, [status], { prepare: true });
-        return result.rows;
+        try {
+            const query = `
+                SELECT user_id, status, last_seen 
+                FROM presence_system.user_presence 
+                WHERE status = ?
+            `;
+            
+            const result = await this.cassandra.execute(query, [status], { prepare: true });
+            this.logger.debug('Retrieved users by status', { 
+                status,
+                userCount: result.rows.length
+            });
+            return result.rows;
+        } catch (error) {
+            this.logger.error('Failed to get users by status', { 
+                error,
+                status
+            });
+            throw error;
+        }
     }
 
     async close() {
-        await this.cassandra.shutdown();
+        try {
+            await this.cassandra.shutdown();
+            this.logger.info('Database connection closed');
+        } catch (error) {
+            this.logger.error('Error closing database connection', { error });
+            throw error;
+        }
     }
 }

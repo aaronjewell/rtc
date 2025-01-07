@@ -5,7 +5,7 @@ import { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
 
 export class PresenceServer {
-    constructor(dal, serviceDiscovery) {
+    constructor(dal, serviceDiscovery, logger) {
         this.app = express();
         this.server = http.createServer(this.app);
         this.wss = new WebSocketServer({ server: this.server });
@@ -14,19 +14,22 @@ export class PresenceServer {
         this.clients = new Map();
         this.serviceDiscovery = serviceDiscovery;
         this.dal = dal;
+        this.logger = logger;
     }
 
     async init() {
         try {
             await this.#readJwtSecret();
+            this.logger.debug('JWT secret loaded');
 
             this.#setupWebSocket();
             this.#setupServer();
             this.#setupGracefulShutdown();
 
             this.#startHeartbeat();
+            this.logger.info('Presence server initialized successfully');
         } catch (error) {
-            console.error('Failed to start server:', error);
+            this.logger.error('Failed to start server', { error });
             throw error;
         }
     }
@@ -39,7 +42,10 @@ export class PresenceServer {
         const port = process.env.PORT;
 
         this.server.listen(port, () => {
-            console.log(`Chat server ${process.env.SERVER_ID} is running on port ${port}`);
+            this.logger.info('Presence server started', { 
+                serverId: process.env.SERVER_ID,
+                port 
+            });
         });
     }
 
@@ -48,6 +54,7 @@ export class PresenceServer {
             try {
                 const token = new URL(req.url, 'ws://localhost').searchParams.get('token');
                 if (!token) {
+                    this.logger.warn('Connection attempt without token');
                     ws.close(4001, 'No authentication token provided');
                     return;
                 }
@@ -67,13 +74,13 @@ export class PresenceServer {
 
                 await this.#updatePresence(userId, 'online');
 
-                console.log(`Client connected: ${userId}`);
+                this.logger.info('Client connected', { userId });
 
                 ws.on('message', async (message) => {
                     try {
                         await this.#handleMessage(userId, message);
                     } catch (error) {
-                        console.error('Error handling message:', error);
+                        this.logger.error('Error handling message', { error, userId });
                         ws.send(JSON.stringify({
                             type: 'error',
                             error: 'Failed to process message'
@@ -88,7 +95,7 @@ export class PresenceServer {
                 await this.sendInitialPresenceData(ws);
 
             } catch (error) {
-                console.error('WebSocket connection error:', error);
+                this.logger.error('WebSocket connection error', { error });
                 ws.close(4002, 'Authentication failed');
             }
         });
@@ -96,6 +103,7 @@ export class PresenceServer {
 
     async #handleMessage(userId, message) {
         const data = JSON.parse(message);
+        this.logger.debug('Received message', { userId, messageType: data.type });
 
         switch (data.type) {
             case 'status_update':
@@ -111,6 +119,7 @@ export class PresenceServer {
                 break;
 
             default:
+                this.logger.warn('Unknown message type', { userId, messageType: data.type });
                 throw new Error('Unknown message type');
         }
     }
@@ -120,14 +129,22 @@ export class PresenceServer {
         const serverId = this.serviceDiscovery.getServerId();
         await this.dal.updatePresence(userId, status, deviceInfo, serverId);
         
+        this.logger.debug('Status updated', { userId, status });
         this.#broadcastStatus(userId, status);
     }
 
     async #handleSubscribe(userId, userIds) {
         const client = this.clients.get(userId);
-        if (!client) return;
+        if (!client) {
+            this.logger.warn('Subscribe request from unknown client', { userId });
+            return;
+        }
 
         const presenceData = await this.dal.getPresenceData(userIds);
+        this.logger.debug('Sending presence data', { 
+            userId, 
+            subscribedUsers: userIds.length 
+        });
         
         client.ws.send(JSON.stringify({
             type: 'presence_update',
@@ -140,6 +157,7 @@ export class PresenceServer {
         if (client) {
             client.lastSeen = new Date();
             await this.#updatePresence(userId, client.status);
+            this.logger.debug('Heartbeat received', { userId });
         }
     }
 
@@ -147,13 +165,14 @@ export class PresenceServer {
         const client = this.clients.get(userId);
         if (client) {
             this.clients.delete(userId);
-            console.log(`Client disconnected: ${userId}`);
+            this.logger.info('Client disconnected', { userId });
+            await this.#updatePresence(userId, 'offline');
         }
     }
 
     async #updatePresence(userId, status) {
         await this.dal.updatePresence(userId, status);
-
+        this.logger.debug('Presence updated', { userId, status });
         this.#broadcastStatus(userId, status);
     }
 
@@ -167,15 +186,26 @@ export class PresenceServer {
             }]
         };
 
+        let broadcastCount = 0;
         this.clients.forEach((client) => {
             if (client.ws.readyState === WebSocket.OPEN) {
                 client.ws.send(JSON.stringify(update));
+                broadcastCount++;
             }
+        });
+
+        this.logger.debug('Status broadcast complete', { 
+            userId, 
+            status, 
+            recipientCount: broadcastCount 
         });
     }
 
     async sendInitialPresenceData(ws) {
         const onlineUsers = await this.dal.getUsersByStatus('online');
+        this.logger.debug('Sending initial presence data', { 
+            onlineUserCount: onlineUsers.length 
+        });
 
         ws.send(JSON.stringify({
             type: 'initial_presence',
@@ -188,21 +218,29 @@ export class PresenceServer {
             const now = Date.now();
             this.clients.forEach((client, userId) => {
                 if (now - client.lastSeen.getTime() > this.heartbeatInterval * 2) {
-                    // Client hasn't sent heartbeat, consider them disconnected
+                    this.logger.warn('Client heartbeat timeout', { userId });
                     this.#handleDisconnection(userId);
                 }
             });
         }, this.heartbeatInterval);
+
+        this.logger.debug('Heartbeat monitor started', { 
+            intervalMs: this.heartbeatInterval 
+        });
     }
 
     #verifyToken(token) {
         if (!this.JWT_SECRET) {
+            this.logger.error('JWT secret not initialized');
             throw new Error('JWT secret not initialized');
         }
 
         return new Promise((resolve, reject) => {
             jwt.verify(token, this.JWT_SECRET, (err, decoded) => {
-                if (err) reject(err);
+                if (err) {
+                    this.logger.warn('Token verification failed', { error: err });
+                    reject(err);
+                }
                 else resolve(decoded);
             });
         });
@@ -210,7 +248,7 @@ export class PresenceServer {
 
     #setupGracefulShutdown() {
         const shutdown = async () => {
-            console.log('Shutting down presence server...');
+            this.logger.info('Starting graceful shutdown');
             
             this.wss.clients.forEach((client) => {
                 client.close(1000, 'Server shutting down');
@@ -222,11 +260,11 @@ export class PresenceServer {
             }
 
             await this.dal.close();
-
             this.serviceDiscovery.close();
 
             this.server.close(() => {
-                console.log('Server shutdown complete');
+                this.logger.info('Server shutdown complete');
+                this.logger.close();
                 process.exit(0);
             });
         };

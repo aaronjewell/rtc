@@ -1,6 +1,14 @@
 import { Kafka } from 'kafkajs';
-import { Redis } from 'ioredis';
 import express from 'express';
+import Redis from 'ioredis';
+import { Logger } from '@rtc/shared/logger';
+
+const logger = new Logger({
+    serviceName: 'message-dispatcher',
+    serviceId: process.env.SERVICE_ID || '1',
+    logstashHost: process.env.LOGSTASH_HOST,
+    logstashPort: parseInt(process.env.LOGSTASH_PORT || '5000')
+});
 
 async function checkHealth(redis, consumer) {
     const health = {
@@ -19,7 +27,7 @@ async function checkHealth(redis, consumer) {
     } catch (error) {
         health.components.redis = 'error';
         health.status = 'error';
-        console.error('Redis health check failed', { error: error.message });
+        logger.error('Redis health check failed', { error: error.message });
     }
 
     try {
@@ -32,14 +40,14 @@ async function checkHealth(redis, consumer) {
     } catch (error) {
         health.components.kafka = 'error';
         health.status = 'error';
-        console.error('Kafka health check failed', { error: error.message });
+        logger.error('Kafka health check failed', { error: error.message });
     }
 
     return health;
 }
 
 async function initialize() {
-    console.info('Initialized message dispatcher');
+    logger.info('Initialized message dispatcher');
 
     const kafka = new Kafka({
         clientId: `message-dispatcher`,
@@ -71,11 +79,11 @@ async function initialize() {
         });
         
         server = app.listen(process.env.PORT, () => {
-            console.log(`Health check server started on port ${process.env.PORT}`);
+            logger.info(`Health check server started on port ${process.env.PORT}`);
         });
 
         server.on('error', (error) => {
-            console.error('Health check server error', { 
+            logger.error('Health check server error', { 
                 error: error.message,
                 stack: error.stack 
             });
@@ -83,7 +91,7 @@ async function initialize() {
             server = null;
         });
     } catch (error) {
-        console.error('Failed to start health check server', { 
+        logger.error('Failed to start health check server', { 
             error: error.message,
             stack: error.stack 
         });
@@ -100,11 +108,11 @@ async function dispatchMessage(message, redis) {
 
         const serverInfo = await redis.hgetall(`user:${target_user_id}`);
         if (!serverInfo || !serverInfo.host) {
-            console.log(`No server found for user ${target_user_id}`);
+            logger.info(`No server found for user ${target_user_id}`);
             return;
         }
 
-        console.log(`Dispatching message to server ${serverInfo.host}:${serverInfo.port}`);
+        logger.info(`Dispatching message to server ${serverInfo.host}:${serverInfo.port}`);
 
         const response = await fetch(`http://${serverInfo.host}:${serverInfo.port}/dispatch-message`, {
             method: 'POST',
@@ -116,7 +124,7 @@ async function dispatchMessage(message, redis) {
             throw new Error(`Failed to dispatch message: ${response.statusText}`);
         }
     } catch (error) {
-        console.error('Error dispatching message:', error);
+        logger.error('Error dispatching message:', { error });
     }
 }
 
@@ -125,7 +133,7 @@ async function run() {
         const { consumer, redis, server } = await initialize();
         
         await consumer.connect();
-        console.log('Connected to Kafka');
+        logger.info('Connected to Kafka');
 
         await consumer.subscribe({ 
             topic: 'chat-messages', 
@@ -141,18 +149,18 @@ async function run() {
             }
         });
 
-        console.log(`Message dispatcher is running`);
+        logger.info(`Message dispatcher is running`);
 
         // Graceful shutdown
         const shutdown = async () => {
-            console.log(`Shutting down message dispatcher...`);
+            logger.info(`Shutting down message dispatcher...`);
             try {
                 await consumer.disconnect();
                 redis.disconnect();
                 server.close();
                 process.exit(0);
             } catch (error) {
-                console.error('Error during shutdown:', error);
+                logger.error('Error during shutdown:', { error });
                 process.exit(1);
             }
         };
@@ -161,9 +169,14 @@ async function run() {
         process.on('SIGINT', shutdown);
 
     } catch (error) {
-        console.error('Failed to start message dispatcher:', error);
+        logger.error('Failed to start message dispatcher:', { error });
         process.exit(1);
     }
 }
 
-run().catch(console.error);
+try {
+    run();
+} catch (error) {
+    logger.error('Fatal error during startup', { error });
+    process.exit(1);
+}

@@ -9,7 +9,7 @@ import { Redis } from 'ioredis';
 import { randomUUID } from 'crypto';
 
 export class ChatServer {
-    constructor(dal, serviceDiscovery, idGenerator, serverId) {
+    constructor(dal, serviceDiscovery, idGenerator, serverId, logger) {
         this.app = express();
         this.server = http.createServer(this.app);
         this.wss = new WebSocketServer({ server: this.server });
@@ -19,6 +19,7 @@ export class ChatServer {
         this.serviceDiscovery = serviceDiscovery;
         this.idGenerator = idGenerator;
         this.serverId = serverId;
+        this.logger = logger;
 
         const kafka = new Kafka({
             clientId: `chat-server-${this.serverId}`,
@@ -50,6 +51,7 @@ export class ChatServer {
     async init() {
         await this.#readJwtSecret();
         await this.producer.connect();
+        this.logger.info('Connected to Kafka producer');
 
         this.#setupWebSocket();
         this.#setupServer();
@@ -65,23 +67,23 @@ export class ChatServer {
 
         this.app.post('/dispatch-message', express.json(), async (req, res) => {
             const message = req.body;
-            console.log(`Dispatching message to user ${message.target_user_id}`);
+            this.logger.debug(`Dispatching message to user ${message.target_user_id}`);
             try {
                 await this.#deliverMessage(message);
                 res.status(200).send('Message dispatched');
             } catch (error) {
-                console.error('Error dispatching message:', error);
+                this.logger.error('Error dispatching message:', { error: error.message, stack: error.stack });
                 res.status(500).send('Failed to dispatch message');
             }
         });
 
         this.server.listen(port, () => {
-            console.log(`Chat server ${this.serverId} is running on port ${port}`);
+            this.logger.info(`Chat server ${this.serverId} is running on port ${port}`);
         });
     }
 
     #setupWebSocket() {
-        this.subscribedChannels = new Map(); // userId -> Set of channelIds
+        this.subscribedChannels = new Map();
 
         this.wss.on('connection', async (ws, req) => {
             try {
@@ -97,7 +99,7 @@ export class ChatServer {
                 this.clients.set(userId, ws);
                 this.subscribedChannels.set(userId, new Set());
 
-                console.log(`Client connected: ${userId}`);
+                this.logger.info(`Client connected: ${userId}`);
 
                 this.redis.hmset(`user:${userId}`, {
                     serverId: this.serverId,
@@ -116,7 +118,12 @@ export class ChatServer {
                     try {
                         await this.#handleMessage(userId, message);
                     } catch (error) {
-                        console.error('Error handling message:', error, message.toString());
+                        this.logger.error('Error handling message:', { 
+                            error: error.message, 
+                            stack: error.stack,
+                            userId,
+                            message: message.toString()
+                        });
                         ws.send(JSON.stringify({
                             type: 'error',
                             error: 'Failed to process message'
@@ -127,12 +134,12 @@ export class ChatServer {
                 ws.on('close', async () => {
                     this.clients.delete(userId);
                     this.subscribedChannels.delete(userId);
-                    console.log(`Client disconnected: ${userId}`);
+                    this.logger.info(`Client disconnected: ${userId}`);
                     await this.redis.del(`user:${userId}`);
                 });
 
             } catch (error) {
-                console.error('WebSocket connection error:', error);
+                this.logger.error('WebSocket connection error:', { error: error.message, stack: error.stack });
                 ws.close(3000, 'Authentication failed');
             }
         });
@@ -303,7 +310,11 @@ export class ChatServer {
     async #handleChatMessage(userId, channelId, content, metadata = {}) {
         const messageId = this.idGenerator.generate();
 
-        console.log(`Storing message ${messageId} for channel ${channelId}`);
+        this.logger.debug(`Storing message ${messageId} for channel ${channelId}`, {
+            userId,
+            channelId,
+            messageId
+        });
 
         const storedMessage = await this.dal.storeMessage(
             channelId,
@@ -322,9 +333,8 @@ export class ChatServer {
     async broadcastToChannel(channelId, message) {
         const participants = await this.dal.getChannelParticipants(channelId);
         
-        // Create a message for each participant's partition
         const kafkaMessages = participants.map(participant => ({
-            key: participant.user_id, // Ensures messages for same user go to same partition
+            key: participant.user_id,
             value: JSON.stringify({
                 ...message,
                 sender_id: message.user_id,
@@ -340,7 +350,11 @@ export class ChatServer {
                 timeout: 30000
             });
         } catch (error) {
-            console.error('Failed to broadcast message:', error);
+            this.logger.error('Failed to broadcast message:', { 
+                error: error.message, 
+                stack: error.stack,
+                channelId
+            });
             throw error;
         }
     }
@@ -355,11 +369,11 @@ export class ChatServer {
             ws.send(JSON.stringify({
                 type: 'chat_message',
                 ...message,
-                user_id: message.sender_id  // Ensure the client sees the original sender
+                user_id: message.sender_id
             }));
             return true;
         } else {
-            console.log(`User ${message.target_user_id} not connected to this server or connection not open`);
+            this.logger.debug(`User ${message.target_user_id} not connected to this server or connection not open`);
             return false;
         }
     }
@@ -382,7 +396,7 @@ export class ChatServer {
 
     #setupGracefulShutdown() {
         const shutdown = async () => {
-            console.log('Shutting down chat server...');
+            this.logger.info('Shutting down chat server...');
 
             const userIds = Array.from(this.clients.keys());
 
@@ -402,7 +416,8 @@ export class ChatServer {
             });
 
             this.server.close(() => {
-                console.log('Server shutdown complete');
+                this.logger.info('Server shutdown complete');
+                this.logger.close();
                 process.exit(0);
             });
         };

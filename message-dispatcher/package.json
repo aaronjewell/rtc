@@ -10,6 +10,7 @@
         "express": "^4.21.2",
         "kafkajs": "^2.2.4",
         "node-zookeeper-client": "^1.1.0",
-        "ioredis": "^5.4.2"
+        "ioredis": "^5.4.2",
+        "@rtc/shared": "file:../shared"
     }
 }
