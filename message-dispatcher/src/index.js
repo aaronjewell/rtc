@@ -1,19 +1,14 @@
 import { Kafka } from 'kafkajs';
 import { Redis } from 'ioredis';
-import { ServiceDiscovery } from './service-discovery.js';
 import express from 'express';
 
-let serverId;
-
-async function checkHealth(redis, consumer, serviceDiscovery) {
+async function checkHealth(redis, consumer) {
     const health = {
         status: 'ok',
-        serverId,
         timestamp: new Date().toISOString(),
         components: {
             kafka: 'unknown',
             redis: 'unknown',
-            zookeeper: 'unknown'
         }
     };
 
@@ -40,29 +35,14 @@ async function checkHealth(redis, consumer, serviceDiscovery) {
         console.error('Kafka health check failed', { error: error.message });
     }
 
-    try {
-        // Check ZooKeeper
-        const zkState = serviceDiscovery.getState();
-        health.components.zookeeper = zkState === 'SYNC_CONNECTED' ? 'ok' : 'error';
-        if (health.components.zookeeper !== 'ok') {
-            health.status = 'error';
-        }
-    } catch (error) {
-        health.components.zookeeper = 'error';
-        health.status = 'error';
-        console.error('ZooKeeper health check failed', { error: error.message });
-    }
-
     return health;
 }
 
 async function initialize() {
-    const serviceDiscovery = new ServiceDiscovery();
-    serverId = await serviceDiscovery.init();
-    console.info('Initialized message dispatcher', { serverId });
+    console.info('Initialized message dispatcher');
 
     const kafka = new Kafka({
-        clientId: `message-dispatcher-${serverId}`,
+        clientId: `message-dispatcher`,
         brokers: [process.env.KAFKA_BROKER]
     });
 
@@ -86,7 +66,7 @@ async function initialize() {
         // Setup express server for health checks
         const app = express();
         app.get('/health', async (req, res) => {
-            const health = await checkHealth(redis, consumer, serviceDiscovery);
+            const health = await checkHealth(redis, consumer);
             res.status(health.status === 'ok' ? 200 : 503).json(health);
         });
         
@@ -110,7 +90,7 @@ async function initialize() {
         // Continue without health check server
     }
 
-    return { kafka, consumer, redis, serviceDiscovery, server };
+    return { kafka, consumer, redis, server };
 }
 
 async function dispatchMessage(message, redis) {
@@ -142,7 +122,7 @@ async function dispatchMessage(message, redis) {
 
 async function run() {
     try {
-        const { consumer, redis, serviceDiscovery, server } = await initialize();
+        const { consumer, redis, server } = await initialize();
         
         await consumer.connect();
         console.log('Connected to Kafka');
@@ -161,15 +141,14 @@ async function run() {
             }
         });
 
-        console.log(`Message dispatcher ${serverId} is running`);
+        console.log(`Message dispatcher is running`);
 
         // Graceful shutdown
         const shutdown = async () => {
-            console.log(`Shutting down message dispatcher ${serverId}...`);
+            console.log(`Shutting down message dispatcher...`);
             try {
                 await consumer.disconnect();
                 redis.disconnect();
-                serviceDiscovery.close();
                 server.close();
                 process.exit(0);
             } catch (error) {
